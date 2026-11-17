@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using Construction;
+using HarmonyLib;
 using RedLoader;
 using Sons.Gameplay;
 using Sons.Weapon;
@@ -17,25 +18,37 @@ namespace RainExtinguishesFires;
 public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
 {
     private const float UpdateInterval = 1f;
-    private const float FireRefreshInterval = 4f;
-    private const float FireArrowRefreshInterval = 2f;
+    private const float FireCheckInterval = 1f;
+    private const int FireChecksPerFrame = 4;
+    private const float MaxExposureStep = 2f;
+    private const float FallbackFireScanInterval = 30f;
+    private const float FallbackFireArrowScanInterval = 2f;
     private const float RoofCheckDistance = 12f;
     private const float RaycastUpOffset = 0.35f;
-    private static readonly Dictionary<int, float> FireExposureTimes = new();
     private static readonly Dictionary<int, float> TorchExposureTimes = new();
     private static readonly Dictionary<int, float> FireArrowExposureTimes = new();
     private static readonly Dictionary<int, float> MolotovExposureTimes = new();
-    private static readonly HashSet<int> ActiveFireIds = new();
     private static readonly HashSet<int> ActiveTorchIds = new();
     private static readonly HashSet<int> ActiveFireArrowIds = new();
     private static readonly HashSet<int> ActiveMolotovIds = new();
     private static readonly List<int> StaleExposureIds = new();
-    private static CookingFireNew[] _cachedFires = Array.Empty<CookingFireNew>();
-    private static FireArrowController[] _cachedFireArrows = Array.Empty<FireArrowController>();
-    private static float _fireRefreshElapsed;
-    private static float _fireArrowRefreshElapsed;
-    private static bool _fireCacheInitialized;
-    private static bool _fireArrowCacheInitialized;
+    private static readonly ComponentRegistry<CookingFireNew> Fires = new();
+    private static readonly ComponentRegistry<FireArrowController> FireArrows = new();
+    private static HarmonyLib.Harmony? _harmony;
+    private static bool _fireHooksActive;
+    private static bool _fireArrowHooksActive;
+    private static bool _fireHooksObserved;
+    private static bool _fireArrowHooksObserved;
+    private static bool _fireScanFallback;
+    private static bool _fireArrowScanFallback;
+    private static float _fallbackFireScanElapsed;
+    private static float _fallbackFireArrowScanElapsed;
+    private static bool _fallbackFireScanPending = true;
+    private static bool _fallbackFireArrowScanPending = true;
+    private static int _fireCursor;
+    private static bool _badWeather;
+    private static bool _wasBadWeather;
+    private static bool _isAuthority = true;
     private static ConfigEntry<bool> _campfireEnabled = null!;
     private static ConfigEntry<float> _fireTimer = null!;
     private static ConfigEntry<bool> _playExtinguishSound = null!;
@@ -51,10 +64,9 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
     private static FMOD.System _fmodCoreSystem;
     private static FMOD.Sound _extinguishSound;
     private static bool _extinguishSoundLoaded;
+    private static bool _extinguishSoundFailed;
     private static bool _fmodWarningLogged;
     private static float _rainSicknessExposure;
-    private static bool _loggedHeldItemDiagnostic;
-    private static bool _loggedPlayerExposureDiagnostic;
     private bool _hasLoggedUpdate;
     private float _updateAccumulator;
 
@@ -62,7 +74,23 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
     {
         InitializeConfig();
         InitializeAudio();
+        InitializeHooks();
         RLog.Msg("[RainExtinguishesFires] Mod initialized.");
+    }
+
+    protected override void OnGameStart()
+    {
+        _fireCursor = 0;
+        _wasBadWeather = false;
+        _fallbackFireScanPending = true;
+        _fallbackFireArrowScanPending = true;
+        Fires.PruneDestroyed();
+        FireArrows.PruneDestroyed();
+        VerifyFireHooks();
+        if (_playExtinguishSound.Value)
+        {
+            TryLoadExtinguishSound();
+        }
     }
 
     public void OnUpdate()
@@ -74,14 +102,14 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
         }
 
         _updateAccumulator += Time.deltaTime;
-        if (_updateAccumulator < UpdateInterval)
+        if (_updateAccumulator >= UpdateInterval)
         {
-            return;
+            float elapsed = _updateAccumulator;
+            _updateAccumulator = 0f;
+            UpdateLiveState(elapsed);
         }
 
-        float elapsed = _updateAccumulator;
-        _updateAccumulator = 0f;
-        UpdateLiveState(elapsed);
+        UpdateCampfireSlice(Time.time);
     }
 
     private static void InitializeConfig()
@@ -132,6 +160,121 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
         return entry;
     }
 
+    private static void InitializeHooks()
+    {
+        try
+        {
+            _harmony = new HarmonyLib.Harmony("Zemo.RainExtinguishesFires");
+        }
+        catch (Exception exception)
+        {
+            RLog.Warning($"[RainExtinguishesFires] Harmony unavailable, using periodic scans instead: {exception.Message}");
+            _fireScanFallback = true;
+            _fireArrowScanFallback = true;
+            return;
+        }
+
+        _fireHooksActive = TryPatchLifecycle(typeof(CookingFireNew), nameof(OnFireEnabled), nameof(OnFireDisabled));
+        _fireArrowHooksActive = TryPatchLifecycle(typeof(FireArrowController), nameof(OnFireArrowEnabled), nameof(OnFireArrowDisabled));
+        _fireScanFallback = !_fireHooksActive;
+        _fireArrowScanFallback = !_fireArrowHooksActive;
+        RLog.Msg($"[RainExtinguishesFires] Fire tracking hooks: fires={_fireHooksActive}, fireArrows={_fireArrowHooksActive}.");
+    }
+
+    private static bool TryPatchLifecycle(Type targetType, string enabledPostfix, string disabledPostfix)
+    {
+        if (_harmony == null)
+        {
+            return false;
+        }
+
+        try
+        {
+            MethodInfo? onEnable = AccessTools.Method(targetType, "OnEnable");
+            MethodInfo? onDisable = AccessTools.Method(targetType, "OnDisable");
+            if (onEnable == null || onDisable == null)
+            {
+                RLog.Warning($"[RainExtinguishesFires] Could not find OnEnable/OnDisable on {targetType.Name}, using periodic scans instead.");
+                return false;
+            }
+
+            _harmony.Patch(onEnable, postfix: new HarmonyMethod(typeof(RainExtinguishesFiresMod), enabledPostfix));
+            _harmony.Patch(onDisable, postfix: new HarmonyMethod(typeof(RainExtinguishesFiresMod), disabledPostfix));
+            return true;
+        }
+        catch (Exception exception)
+        {
+            RLog.Warning($"[RainExtinguishesFires] Could not hook {targetType.Name}, using periodic scans instead: {exception.Message}");
+            return false;
+        }
+    }
+
+    private static void OnFireEnabled(CookingFireNew __instance)
+    {
+        _fireHooksObserved = true;
+        Fires.Add(__instance);
+    }
+
+    private static void OnFireDisabled(CookingFireNew __instance)
+    {
+        _fireHooksObserved = true;
+        Fires.Remove(__instance);
+    }
+
+    private static void OnFireArrowEnabled(FireArrowController __instance)
+    {
+        _fireArrowHooksObserved = true;
+        FireArrows.Add(__instance);
+    }
+
+    private static void OnFireArrowDisabled(FireArrowController __instance)
+    {
+        _fireArrowHooksObserved = true;
+        FireArrows.Remove(__instance);
+    }
+
+    private static void VerifyFireHooks()
+    {
+        if (!_fireHooksActive || _fireScanFallback || _fireHooksObserved)
+        {
+            return;
+        }
+
+        CookingFireNew[] found = UnityEngine.Object.FindObjectsByType<CookingFireNew>(FindObjectsSortMode.None);
+        int added = Fires.Sync(found);
+        if (_fireHooksObserved)
+        {
+            return;
+        }
+
+        if (added > 0)
+        {
+            _fireScanFallback = true;
+            RLog.Warning("[RainExtinguishesFires] Fire hooks are not reporting fires, switching to periodic scans.");
+        }
+    }
+
+    private static void VerifyFireArrowHooks()
+    {
+        if (!_fireArrowHooksActive || _fireArrowScanFallback || _fireArrowHooksObserved)
+        {
+            return;
+        }
+
+        FireArrowController[] found = UnityEngine.Object.FindObjectsByType<FireArrowController>(FindObjectsSortMode.None);
+        int added = FireArrows.Sync(found);
+        if (_fireArrowHooksObserved)
+        {
+            return;
+        }
+
+        if (added > 0)
+        {
+            _fireArrowScanFallback = true;
+            RLog.Warning("[RainExtinguishesFires] Fire arrow hooks are not reporting arrows, switching to periodic scans.");
+        }
+    }
+
     private static void InitializeAudio()
     {
         string assemblyDirectory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? AppContext.BaseDirectory;
@@ -166,7 +309,7 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
             return true;
         }
 
-        if (_extinguishSoundPath == null)
+        if (_extinguishSoundPath == null || _extinguishSoundFailed)
         {
             return false;
         }
@@ -184,6 +327,7 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
             out _extinguishSound);
         if (result != FMOD.RESULT.OK)
         {
+            _extinguishSoundFailed = true;
             LogFmodWarning($"Could not load WAV (FMOD result: {result}).");
             return false;
         }
@@ -205,45 +349,50 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
     private static void UpdateLiveState(float deltaTime)
     {
         WeatherSystem weather = WeatherSystem.Instance;
-        bool badWeather = weather != null && (weather.IsRaining || weather.IsSnowing);
-        GameObject player = LocalPlayer.PlayerBase;
-        Transform playerCamera = LocalPlayer.MainCamTr;
-        bool handheldEnabled = _torchEnabled.Value || _fireArrowsEnabled.Value || _molotovEnabled.Value;
-        bool needsPlayerExposure = _rainSicknessEnabled.Value || handheldEnabled;
-        bool hasRoof = false;
-        if (player != null && badWeather && needsPlayerExposure)
-        {
-            Vector3 exposurePosition = playerCamera != null ? playerCamera.position : player.transform.position;
-            hasRoof = HasRoofOverhead(exposurePosition);
-        }
-        bool playerExposed = player != null && badWeather && needsPlayerExposure && !hasRoof;
+        _badWeather = weather != null && (weather.IsRaining || weather.IsSnowing);
+        _isAuthority = BoltNetwork.isServerOrNotRunning;
+        bool weatherStarted = _badWeather && !_wasBadWeather;
+        bool weatherEnded = !_badWeather && _wasBadWeather;
+        _wasBadWeather = _badWeather;
 
-        if (!_loggedPlayerExposureDiagnostic && badWeather && needsPlayerExposure)
+        if (weatherEnded)
         {
-            bool rootHasRoof = player != null && HasRoofOverhead(player.transform.position);
-            Vector3 exposurePosition = playerCamera != null ? playerCamera.position : player != null ? player.transform.position : Vector3.zero;
-            RLog.Msg($"[RainExtinguishesFires] Player exposure check: player={player != null}, camera={playerCamera != null}, rootRoof={rootHasRoof}, selectedRoof={hasRoof}, exposed={playerExposed}, position={exposurePosition}.");
-            _loggedPlayerExposureDiagnostic = true;
+            Fires.ResetExposure();
         }
 
-        if (!_loggedHeldItemDiagnostic && handheldEnabled && playerExposed)
+        if (_campfireEnabled.Value && _badWeather)
         {
-            LogHeldItemDiagnostic();
-            _loggedHeldItemDiagnostic = true;
-        }
+            if (weatherStarted)
+            {
+                VerifyFireHooks();
+            }
 
-        UpdateRainSickness(playerExposed, deltaTime);
-        if (_campfireEnabled.Value && badWeather)
-        {
-            UpdateCampfires(true, deltaTime);
+            if (_fireScanFallback)
+            {
+                RefreshFallbackFires(deltaTime);
+            }
         }
         else
         {
-            FireExposureTimes.Clear();
-            _cachedFires = Array.Empty<CookingFireNew>();
-            _fireRefreshElapsed = 0f;
-            _fireCacheInitialized = false;
+            _fallbackFireScanPending = true;
+            _fallbackFireScanElapsed = 0f;
         }
+
+        bool handheldEnabled = _torchEnabled.Value || _fireArrowsEnabled.Value || _molotovEnabled.Value;
+        bool needsPlayerExposure = _rainSicknessEnabled.Value || handheldEnabled;
+        bool playerExposed = false;
+        if (_badWeather && needsPlayerExposure)
+        {
+            GameObject player = LocalPlayer.PlayerBase;
+            if (player != null)
+            {
+                Transform playerCamera = LocalPlayer.MainCamTr;
+                Vector3 exposurePosition = playerCamera != null ? playerCamera.position : player.transform.position;
+                playerExposed = !HasRoofOverhead(exposurePosition);
+            }
+        }
+
+        UpdateRainSickness(playerExposed, deltaTime);
 
         if (handheldEnabled && playerExposed)
         {
@@ -254,22 +403,34 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
             TorchExposureTimes.Clear();
             FireArrowExposureTimes.Clear();
             MolotovExposureTimes.Clear();
-            _cachedFireArrows = Array.Empty<FireArrowController>();
-            _fireArrowRefreshElapsed = 0f;
-            _fireArrowCacheInitialized = false;
+            _fallbackFireArrowScanPending = true;
+            _fallbackFireArrowScanElapsed = 0f;
         }
+    }
+
+    private static void RefreshFallbackFires(float deltaTime)
+    {
+        _fallbackFireScanElapsed += deltaTime;
+        if (!_fallbackFireScanPending && _fallbackFireScanElapsed < FallbackFireScanInterval)
+        {
+            return;
+        }
+
+        Fires.Sync(UnityEngine.Object.FindObjectsByType<CookingFireNew>(FindObjectsSortMode.None));
+        _fallbackFireScanElapsed = 0f;
+        _fallbackFireScanPending = false;
     }
 
     private static void UpdateRainSickness(bool exposed, float deltaTime)
     {
-        Vitals vitals = LocalPlayer.Vitals;
-        if (!_rainSicknessEnabled.Value || vitals == null)
+        if (!_rainSicknessEnabled.Value)
         {
             _rainSicknessExposure = 0f;
             return;
         }
 
-        if (!exposed || vitals.IsSick)
+        Vitals vitals = LocalPlayer.Vitals;
+        if (vitals == null || !exposed || vitals.IsSick)
         {
             _rainSicknessExposure = 0f;
             return;
@@ -284,47 +445,76 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
         }
     }
 
-    private static void UpdateCampfires(bool badWeather, float deltaTime)
+    private static void UpdateCampfireSlice(float now)
     {
-        ActiveFireIds.Clear();
-        _fireRefreshElapsed += deltaTime;
-        if (!_fireCacheInitialized || _fireRefreshElapsed >= FireRefreshInterval)
+        if (!_campfireEnabled.Value || !_badWeather)
         {
-            _cachedFires = UnityEngine.Object.FindObjectsByType<CookingFireNew>(FindObjectsSortMode.None);
-            _fireRefreshElapsed = 0f;
-            _fireCacheInitialized = true;
+            return;
         }
 
-        foreach (CookingFireNew fire in _cachedFires)
+        List<Tracked<CookingFireNew>> items = Fires.Items;
+        int budget = Math.Min(FireChecksPerFrame, items.Count);
+        int visited = 0;
+        while (budget > 0 && visited < items.Count)
         {
+            if (_fireCursor >= items.Count)
+            {
+                _fireCursor = 0;
+            }
+
+            Tracked<CookingFireNew> tracked = items[_fireCursor];
+            visited++;
+            if (now < tracked.NextCheck)
+            {
+                _fireCursor++;
+                continue;
+            }
+
+            budget--;
+            CookingFireNew fire = tracked.Target;
             if (fire == null)
             {
+                Fires.RemoveAt(_fireCursor);
                 continue;
             }
 
-            int fireId = fire.GetInstanceID();
-            ActiveFireIds.Add(fireId);
-            if (!_campfireEnabled.Value || !fire.IsLit || !badWeather || HasRoofOverhead(fire.transform.position))
-            {
-                FireExposureTimes.Remove(fireId);
-                continue;
-            }
+            _fireCursor++;
+            CheckFire(tracked, fire, now);
+        }
+    }
 
-            if (!Accumulate(FireExposureTimes, fireId, deltaTime, _fireTimer.Value))
-            {
-                continue;
-            }
+    private static void CheckFire(Tracked<CookingFireNew> tracked, CookingFireNew fire, float now)
+    {
+        float step = tracked.LastCheck > 0f ? Math.Min(now - tracked.LastCheck, MaxExposureStep) : 0f;
+        tracked.LastCheck = now;
+        tracked.NextCheck = now + FireCheckInterval;
 
-            FireExposureTimes.Remove(fireId);
-            if (BoltNetwork.isServerOrNotRunning)
-            {
-                fire.SetPutOut();
-                PlayExtinguishSound();
-                RLog.Msg($"[RainExtinguishesFires] Fire {fireId} extinguished by rain/snow.");
-            }
+        if (!fire.IsLit || HasRoofOverhead(fire.transform.position))
+        {
+            tracked.Exposure = 0f;
+            tracked.Done = false;
+            return;
         }
 
-        RemoveMissing(FireExposureTimes, ActiveFireIds);
+        if (tracked.Done)
+        {
+            return;
+        }
+
+        tracked.Exposure += step;
+        if (tracked.Exposure < _fireTimer.Value)
+        {
+            return;
+        }
+
+        tracked.Exposure = 0f;
+        tracked.Done = true;
+        if (_isAuthority)
+        {
+            fire.SetPutOut();
+            PlayExtinguishSound();
+            RLog.Msg($"[RainExtinguishesFires] Fire {tracked.Id} extinguished by rain/snow.");
+        }
     }
 
     private static void UpdateHandheldItems(bool exposed, float deltaTime)
@@ -338,36 +528,19 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
             return;
         }
 
-        var leftItem = inventory.LeftHandItem;
-        var rightItem = inventory.RightHandItem;
-        GameObject? leftItemObject = leftItem == null ? null : leftItem.ItemObject;
-        GameObject? rightItemObject = rightItem == null ? null : rightItem.ItemObject;
+        GameObject? leftItemObject = null;
+        GameObject? rightItemObject = null;
+        if (_torchEnabled.Value || _molotovEnabled.Value)
+        {
+            var leftItem = inventory.LeftHandItem;
+            var rightItem = inventory.RightHandItem;
+            leftItemObject = leftItem == null ? null : leftItem.ItemObject;
+            rightItemObject = rightItem == null ? null : rightItem.ItemObject;
+        }
+
         UpdateTorches(leftItemObject, rightItemObject, exposed, deltaTime);
         UpdateFireArrows(exposed, deltaTime);
         UpdateMolotovs(leftItemObject, rightItemObject, exposed, deltaTime);
-    }
-
-    private static void LogHeldItemDiagnostic()
-    {
-        var inventory = LocalPlayer.Inventory;
-        GameObject? leftItem = inventory == null || inventory.LeftHandItem == null ? null : inventory.LeftHandItem.ItemObject;
-        GameObject? rightItem = inventory == null || inventory.RightHandItem == null ? null : inventory.RightHandItem.ItemObject;
-        int torchCount = UnityEngine.Object.FindObjectsOfType<TorchWeaponController>().Length;
-        int molotovCount = UnityEngine.Object.FindObjectsOfType<MolotovWeaponController>().Length;
-        int fireArrowCount = UnityEngine.Object.FindObjectsOfType<FireArrowController>().Length;
-        RLog.Msg($"[RainExtinguishesFires] Held-item scan: inventory={inventory != null}, left={DescribeItemObject(leftItem)}, right={DescribeItemObject(rightItem)}, scene controllers torch={torchCount}, molotov={molotovCount}, fireArrow={fireArrowCount}.");
-    }
-
-    private static string DescribeItemObject(GameObject? itemObject)
-    {
-        if (itemObject == null)
-        {
-            return "none";
-        }
-
-        int torches = itemObject.GetComponentsInChildren<TorchWeaponController>(true).Length;
-        int molotovs = itemObject.GetComponentsInChildren<MolotovWeaponController>(true).Length;
-        return $"{itemObject.name}(torch={torches},molotov={molotovs})";
     }
 
     private static void UpdateTorches(GameObject? leftItem, GameObject? rightItem, bool exposed, float deltaTime)
@@ -459,22 +632,40 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
         ActiveFireArrowIds.Clear();
         if (_fireArrowsEnabled.Value && exposed)
         {
-            _fireArrowRefreshElapsed += deltaTime;
-            if (!_fireArrowCacheInitialized || _fireArrowRefreshElapsed >= FireArrowRefreshInterval)
+            if (_fallbackFireArrowScanPending && !_fireArrowScanFallback)
             {
-                _cachedFireArrows = UnityEngine.Object.FindObjectsByType<FireArrowController>(FindObjectsSortMode.None);
-                _fireArrowRefreshElapsed = 0f;
-                _fireArrowCacheInitialized = true;
+                VerifyFireArrowHooks();
+                _fallbackFireArrowScanPending = false;
             }
 
-            foreach (FireArrowController arrow in _cachedFireArrows)
+            if (_fireArrowScanFallback)
             {
-                if (arrow == null || !arrow.gameObject.activeInHierarchy)
+                _fallbackFireArrowScanElapsed += deltaTime;
+                if (_fallbackFireArrowScanPending || _fallbackFireArrowScanElapsed >= FallbackFireArrowScanInterval)
+                {
+                    FireArrows.Sync(UnityEngine.Object.FindObjectsByType<FireArrowController>(FindObjectsSortMode.None));
+                    _fallbackFireArrowScanElapsed = 0f;
+                    _fallbackFireArrowScanPending = false;
+                }
+            }
+
+            List<Tracked<FireArrowController>> arrows = FireArrows.Items;
+            for (int i = arrows.Count - 1; i >= 0; i--)
+            {
+                Tracked<FireArrowController> tracked = arrows[i];
+                FireArrowController arrow = tracked.Target;
+                if (arrow == null)
+                {
+                    FireArrows.RemoveAt(i);
+                    continue;
+                }
+
+                if (!arrow.gameObject.activeInHierarchy)
                 {
                     continue;
                 }
 
-                int id = arrow.GetInstanceID();
+                int id = tracked.Id;
                 ActiveFireArrowIds.Add(id);
                 if (!arrow.IsBurning)
                 {
@@ -491,12 +682,6 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
                 PlayExtinguishSound();
             }
         }
-        else
-        {
-            _cachedFireArrows = Array.Empty<FireArrowController>();
-            _fireArrowRefreshElapsed = 0f;
-            _fireArrowCacheInitialized = false;
-        }
         RemoveMissing(FireArrowExposureTimes, ActiveFireArrowIds);
     }
 
@@ -507,7 +692,6 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
             return false;
         }
 
-        times.TryGetValue(id, out elapsed);
         elapsed += deltaTime;
         if (elapsed < requiredTime)
         {
@@ -521,6 +705,11 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
 
     private static void RemoveMissing(Dictionary<int, float> times, HashSet<int> activeIds)
     {
+        if (times.Count == 0)
+        {
+            return;
+        }
+
         StaleExposureIds.Clear();
         foreach (int id in times.Keys)
         {
@@ -558,5 +747,139 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
         {
             LogFmodWarning($"Could not play WAV (FMOD result: {result}).");
         }
+    }
+}
+
+internal sealed class Tracked<T> where T : UnityEngine.Object
+{
+    public readonly T Target;
+    public readonly int Id;
+    public float Exposure;
+    public float LastCheck;
+    public float NextCheck;
+    public bool Done;
+
+    public Tracked(T target, int id)
+    {
+        Target = target;
+        Id = id;
+    }
+}
+
+internal sealed class ComponentRegistry<T> where T : UnityEngine.Object
+{
+    private readonly Dictionary<int, Tracked<T>> _byId = new();
+    private readonly HashSet<int> _seen = new();
+    private readonly List<int> _stale = new();
+
+    public readonly List<Tracked<T>> Items = new();
+
+    public bool Add(T target)
+    {
+        if (target == null)
+        {
+            return false;
+        }
+
+        int id = target.GetInstanceID();
+        if (_byId.ContainsKey(id))
+        {
+            return false;
+        }
+
+        Tracked<T> tracked = new(target, id);
+        _byId[id] = tracked;
+        Items.Add(tracked);
+        return true;
+    }
+
+    public void Remove(T target)
+    {
+        if (target == null)
+        {
+            return;
+        }
+
+        RemoveId(target.GetInstanceID());
+    }
+
+    public void RemoveAt(int index)
+    {
+        Tracked<T> tracked = Items[index];
+        Items.RemoveAt(index);
+        _byId.Remove(tracked.Id);
+    }
+
+    public void PruneDestroyed()
+    {
+        for (int i = Items.Count - 1; i >= 0; i--)
+        {
+            if (Items[i].Target == null)
+            {
+                RemoveAt(i);
+            }
+        }
+    }
+
+    public void ResetExposure()
+    {
+        foreach (Tracked<T> tracked in Items)
+        {
+            tracked.Exposure = 0f;
+            tracked.LastCheck = 0f;
+            tracked.NextCheck = 0f;
+            tracked.Done = false;
+        }
+    }
+
+    public int Sync(T[] found)
+    {
+        int added = 0;
+        _seen.Clear();
+        foreach (T target in found)
+        {
+            if (target == null)
+            {
+                continue;
+            }
+
+            int id = target.GetInstanceID();
+            _seen.Add(id);
+            if (_byId.ContainsKey(id))
+            {
+                continue;
+            }
+
+            Tracked<T> tracked = new(target, id);
+            _byId[id] = tracked;
+            Items.Add(tracked);
+            added++;
+        }
+
+        _stale.Clear();
+        foreach (int id in _byId.Keys)
+        {
+            if (!_seen.Contains(id))
+            {
+                _stale.Add(id);
+            }
+        }
+        foreach (int id in _stale)
+        {
+            RemoveId(id);
+        }
+        _stale.Clear();
+        _seen.Clear();
+        return added;
+    }
+
+    private void RemoveId(int id)
+    {
+        if (!_byId.Remove(id, out Tracked<T>? tracked))
+        {
+            return;
+        }
+
+        Items.Remove(tracked);
     }
 }
