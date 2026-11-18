@@ -5,15 +5,33 @@ using System.Reflection;
 using Construction;
 using HarmonyLib;
 using RedLoader;
+using Sons.Atmosphere;
 using Sons.Gameplay;
+using Sons.Interfaces;
 using Sons.Weapon;
 using SonsSdk;
 using SonsSdk.Attributes;
+using TheForest.Player.Actions;
 using TheForest.Utils;
 using TheForest.World;
 using UnityEngine;
 
 namespace RainExtinguishesFires;
+
+internal enum PrecipitationTier
+{
+    None,
+    Light,
+    Medium,
+    Heavy
+}
+
+internal enum HandheldKind
+{
+    Torch,
+    Molotov,
+    FireArrow
+}
 
 public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
 {
@@ -25,6 +43,13 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
     private const float FallbackFireArrowScanInterval = 2f;
     private const float RoofCheckDistance = 12f;
     private const float RaycastUpOffset = 0.35f;
+    private const float StoneRingRefreshInterval = 10f;
+    private const float MinimumHandheldTimer = 0.5f;
+    private const float PrecipitationClearDelay = 20f;
+    private const int SmokeBurstCount = 30;
+    private const float SmokeLifetime = 8f;
+    private const float BlockedMessageCooldown = 1.5f;
+    private const float BlockedMessageDuration = 2f;
     private static readonly Dictionary<int, float> TorchExposureTimes = new();
     private static readonly Dictionary<int, float> FireArrowExposureTimes = new();
     private static readonly Dictionary<int, float> MolotovExposureTimes = new();
@@ -32,6 +57,13 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
     private static readonly HashSet<int> ActiveFireArrowIds = new();
     private static readonly HashSet<int> ActiveMolotovIds = new();
     private static readonly List<int> StaleExposureIds = new();
+    private static readonly HashSet<int> WetFires = new();
+    private static readonly Dictionary<int, float> PendingWetFires = new();
+    private static readonly List<int> ReadyWetFireIds = new();
+    private static readonly HashSet<HandheldKind> WetHandhelds = new();
+    private static readonly Dictionary<HandheldKind, float> PendingWetHandhelds = new();
+    private static readonly List<HandheldKind> ReadyWetHandhelds = new();
+    private static readonly HashSet<string> LoggedSmokeMisses = new();
     private static readonly ComponentRegistry<CookingFireNew> Fires = new();
     private static readonly ComponentRegistry<FireArrowController> FireArrows = new();
     private static HarmonyLib.Harmony? _harmony;
@@ -46,12 +78,30 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
     private static bool _fallbackFireScanPending = true;
     private static bool _fallbackFireArrowScanPending = true;
     private static int _fireCursor;
+    private static bool _gameStarted;
     private static bool _badWeather;
     private static bool _wasBadWeather;
     private static bool _isAuthority = true;
+    private static float _dryElapsed = PrecipitationClearDelay;
+    private static PrecipitationTier _tier;
+    private static float _lastBlockedMessageTime = -100f;
+    private static bool _stoneRingWarningLogged;
+    private static bool _smokeWarningLogged;
+    private static bool _ignitionWarningLogged;
+    private static bool _messageWarningLogged;
     private static ConfigEntry<bool> _campfireEnabled = null!;
     private static ConfigEntry<float> _fireTimer = null!;
     private static ConfigEntry<bool> _playExtinguishSound = null!;
+    private static ConfigEntry<bool> _smokeEffectEnabled = null!;
+    private static ConfigEntry<float> _stoneRingMultiplier = null!;
+    private static ConfigEntry<bool> _useWeatherTiers = null!;
+    private static ConfigEntry<float> _lightTimer = null!;
+    private static ConfigEntry<float> _mediumTimer = null!;
+    private static ConfigEntry<float> _heavyTimer = null!;
+    private static ConfigEntry<bool> _scaleHandheldsWithTiers = null!;
+    private static ConfigEntry<bool> _preventRelightInRain = null!;
+    private static ConfigEntry<float> _warmGracePeriod = null!;
+    private static ConfigEntry<bool> _blockIgnitionInHeavyWeather = null!;
     private static ConfigEntry<bool> _rainSicknessEnabled = null!;
     private static ConfigEntry<float> _rainSicknessTimer = null!;
     private static ConfigEntry<bool> _torchEnabled = null!;
@@ -59,6 +109,7 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
     private static ConfigEntry<bool> _fireArrowsEnabled = null!;
     private static ConfigEntry<float> _fireArrowTimer = null!;
     private static ConfigEntry<bool> _molotovEnabled = null!;
+    private static ConfigEntry<bool> _preventHandheldRelightInRain = null!;
     private static ConfigEntry<float> _molotovTimer = null!;
     private static string? _extinguishSoundPath;
     private static FMOD.System _fmodCoreSystem;
@@ -78,12 +129,28 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
         RLog.Msg("[RainExtinguishesFires] Mod initialized.");
     }
 
+    protected override void OnSonsSceneInitialized(ESonsScene sonsScene)
+    {
+        if (sonsScene == ESonsScene.Game)
+        {
+            return;
+        }
+
+        _gameStarted = false;
+        ClearWetFires();
+        ClearWetHandhelds();
+    }
+
     protected override void OnGameStart()
     {
+        _gameStarted = true;
         _fireCursor = 0;
         _wasBadWeather = false;
         _fallbackFireScanPending = true;
         _fallbackFireArrowScanPending = true;
+        ClearWetFires();
+        ClearWetHandhelds();
+        _dryElapsed = PrecipitationClearDelay;
         Fires.PruneDestroyed();
         FireArrows.PruneDestroyed();
         VerifyFireHooks();
@@ -109,18 +176,32 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
             UpdateLiveState(elapsed);
         }
 
-        UpdateCampfireSlice(Time.time);
+        UpdateFireSlice(Time.time);
     }
 
     private static void InitializeConfig()
     {
         ConfigCategory campfires = CreateCategory("Campfires", "Campfires & Fires");
+        ConfigCategory weatherTiers = CreateCategory("WeatherIntensity", "Weather Intensity Tiers");
+        ConfigCategory wetFires = CreateCategory("WetFires", "Wet Fires & Relighting");
         ConfigCategory rainSickness = CreateCategory("RainSickness", "Rain Sickness");
         ConfigCategory handheld = CreateCategory("HandheldFlameItems", "Handheld Flame Items");
 
         _campfireEnabled = CreateEntry(campfires, "EnableCampfireExtinguishing", "Enable Campfire Extinguishing", true);
         _fireTimer = CreateEntry(campfires, "FireExtinguishTimer", "Fire Extinguish Timer", 5f, 1f, 60f);
         _playExtinguishSound = CreateEntry(campfires, "PlayExtinguishSound", "Play Extinguish Sound", true);
+        _smokeEffectEnabled = CreateEntry(campfires, "ExtinguishSmokeEffect", "Extinguish Smoke Effect", true);
+        _stoneRingMultiplier = CreateEntry(campfires, "StoneRingTimerMultiplier", "Stone Ring Timer Multiplier", 1.5f, 1f, 3f);
+
+        _useWeatherTiers = CreateEntry(weatherTiers, "UseWeatherIntensityTiers", "Use Weather Intensity Tiers", false);
+        _lightTimer = CreateEntry(weatherTiers, "LightPrecipitationTimer", "Light Precipitation Timer", 15f, 1f, 60f);
+        _mediumTimer = CreateEntry(weatherTiers, "MediumPrecipitationTimer", "Medium Precipitation Timer", 5f, 1f, 60f);
+        _heavyTimer = CreateEntry(weatherTiers, "HeavyPrecipitationTimer", "Heavy Precipitation Timer", 2f, 1f, 60f);
+        _scaleHandheldsWithTiers = CreateEntry(weatherTiers, "ScaleHandheldsWithWeatherTiers", "Scale Handhelds With Weather Tiers", false);
+
+        _preventRelightInRain = CreateEntry(wetFires, "PreventRelightInRain", "Prevent Relight In Rain", false);
+        _warmGracePeriod = CreateEntry(wetFires, "LightRainWarmGracePeriod", "Light Rain Warm Grace Period", 4f, 0f, 15f);
+        _blockIgnitionInHeavyWeather = CreateEntry(wetFires, "BlockIgnitionInHeavyWeather", "Block Ignition In Heavy Weather", false);
 
         _rainSicknessEnabled = CreateEntry(rainSickness, "EnableRainSickness", "Enable Rain Sickness", false);
         _rainSicknessTimer = CreateEntry(rainSickness, "RainSicknessTimer", "Rain Sickness Timer", 60f, 10f, 300f);
@@ -131,8 +212,11 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
         _fireArrowTimer = CreateEntry(handheld, "FireArrowTimer", "Fire Arrow Timer", 5f, 1f, 30f);
         _molotovEnabled = CreateEntry(handheld, "ExtinguishHeldMolotovs", "Extinguish Held Molotovs", false);
         _molotovTimer = CreateEntry(handheld, "HeldMolotovTimer", "Held Molotov Timer", 3f, 1f, 30f);
+        _preventHandheldRelightInRain = CreateEntry(handheld, "PreventHandheldRelightInRain", "Prevent Handheld Relight In Rain", false);
 
         campfires.LoadFromFile(false);
+        weatherTiers.LoadFromFile(false);
+        wetFires.LoadFromFile(false);
         rainSickness.LoadFromFile(false);
         handheld.LoadFromFile(false);
     }
@@ -168,7 +252,7 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
         }
         catch (Exception exception)
         {
-            RLog.Warning($"[RainExtinguishesFires] Harmony unavailable, using periodic scans instead: {exception.Message}");
+            RLog.Warning($"[RainExtinguishesFires] Harmony unavailable, using periodic scans and disabling relight blocking: {exception.Message}");
             _fireScanFallback = true;
             _fireArrowScanFallback = true;
             return;
@@ -178,7 +262,48 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
         _fireArrowHooksActive = TryPatchLifecycle(typeof(FireArrowController), nameof(OnFireArrowEnabled), nameof(OnFireArrowDisabled));
         _fireScanFallback = !_fireHooksActive;
         _fireArrowScanFallback = !_fireArrowHooksActive;
-        RLog.Msg($"[RainExtinguishesFires] Fire tracking hooks: fires={_fireHooksActive}, fireArrows={_fireArrowHooksActive}.");
+
+        int ignitionHooks = 0;
+        if (TryPatchPrefix(typeof(PlayerLightFireAction), "LightFire", nameof(BeforePlayerLightFire)))
+        {
+            ignitionHooks++;
+        }
+        if (TryPatchPrefix(typeof(CookingFireNew), "Sons_Interfaces_ILightableFire_LightFire", nameof(BeforeFireIgnition)))
+        {
+            ignitionHooks++;
+        }
+        if (TryPatchPrefix(typeof(CookingFireNew), "LightFireAction", nameof(BeforeFireIgnition)))
+        {
+            ignitionHooks++;
+        }
+        if (TryPatchPrefix(typeof(CookingFireNew), "Burn", nameof(BeforeFireIgnition)))
+        {
+            ignitionHooks++;
+        }
+
+        int handheldHooks = 0;
+        if (TryPatchPrefix(typeof(TorchWeaponController), "OnLightHeldItem", nameof(BeforeTorchIgnition)))
+        {
+            handheldHooks++;
+        }
+        if (TryPatchPrefix(typeof(TorchWeaponController), "Burn", nameof(BeforeTorchIgnition)))
+        {
+            handheldHooks++;
+        }
+        if (TryPatchPrefix(typeof(MolotovWeaponController), "OnLightHeldItem", nameof(BeforeMolotovIgnition)))
+        {
+            handheldHooks++;
+        }
+        if (TryPatchPrefix(typeof(MolotovWeaponController), "Burn", nameof(BeforeMolotovIgnition)))
+        {
+            handheldHooks++;
+        }
+        if (TryPatchPrefix(typeof(FireArrowController), "Burn", nameof(BeforeFireArrowIgnition)))
+        {
+            handheldHooks++;
+        }
+
+        RLog.Msg($"[RainExtinguishesFires] Fire tracking hooks: fires={_fireHooksActive}, fireArrows={_fireArrowHooksActive}, ignition={ignitionHooks}/4, handheldIgnition={handheldHooks}/5.");
     }
 
     private static bool TryPatchLifecycle(Type targetType, string enabledPostfix, string disabledPostfix)
@@ -209,6 +334,32 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
         }
     }
 
+    private static bool TryPatchPrefix(Type targetType, string methodName, string prefixName)
+    {
+        if (_harmony == null)
+        {
+            return false;
+        }
+
+        try
+        {
+            MethodInfo? target = AccessTools.Method(targetType, methodName);
+            if (target == null)
+            {
+                RLog.Warning($"[RainExtinguishesFires] Could not find {targetType.Name}.{methodName}, relight blocking will skip it.");
+                return false;
+            }
+
+            _harmony.Patch(target, prefix: new HarmonyMethod(typeof(RainExtinguishesFiresMod), prefixName));
+            return true;
+        }
+        catch (Exception exception)
+        {
+            RLog.Warning($"[RainExtinguishesFires] Could not hook {targetType.Name}.{methodName}, relight blocking will skip it: {exception.Message}");
+            return false;
+        }
+    }
+
     private static void OnFireEnabled(CookingFireNew __instance)
     {
         _fireHooksObserved = true;
@@ -231,6 +382,161 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
     {
         _fireArrowHooksObserved = true;
         FireArrows.Remove(__instance);
+    }
+
+    private static bool BeforePlayerLightFire(ILightableFire lightableFire)
+    {
+        try
+        {
+            if (lightableFire == null)
+            {
+                return true;
+            }
+
+            CookingFireNew? fire = lightableFire.TryCast<CookingFireNew>();
+            return fire == null || !ShouldBlockIgnition(fire);
+        }
+        catch (Exception exception)
+        {
+            LogIgnitionWarning(exception);
+            return true;
+        }
+    }
+
+    private static bool BeforeFireIgnition(CookingFireNew __instance)
+    {
+        try
+        {
+            return __instance == null || !ShouldBlockIgnition(__instance);
+        }
+        catch (Exception exception)
+        {
+            LogIgnitionWarning(exception);
+            return true;
+        }
+    }
+
+    private static bool BeforeTorchIgnition()
+    {
+        return AllowHandheldIgnition(HandheldKind.Torch);
+    }
+
+    private static bool BeforeMolotovIgnition()
+    {
+        return AllowHandheldIgnition(HandheldKind.Molotov);
+    }
+
+    private static bool BeforeFireArrowIgnition()
+    {
+        return AllowHandheldIgnition(HandheldKind.FireArrow);
+    }
+
+    private static bool AllowHandheldIgnition(HandheldKind kind)
+    {
+        try
+        {
+            if (!_gameStarted || !_preventHandheldRelightInRain.Value || !WetHandhelds.Contains(kind))
+            {
+                return true;
+            }
+
+            if (IsPlayerSheltered())
+            {
+                return true;
+            }
+
+            ShowBlockedMessage(kind switch
+            {
+                HandheldKind.Torch => "Your torch is soaked. Find shelter or wait for the weather to clear.",
+                HandheldKind.Molotov => "The molotov rag is soaked. Find shelter or wait for the weather to clear.",
+                _ => "Your fire arrows are soaked. Find shelter or wait for the weather to clear."
+            });
+            return false;
+        }
+        catch (Exception exception)
+        {
+            LogIgnitionWarning(exception);
+            return true;
+        }
+    }
+
+    private static bool IsPlayerSheltered()
+    {
+        GameObject player = LocalPlayer.PlayerBase;
+        if (player == null)
+        {
+            return true;
+        }
+
+        Transform playerCamera = LocalPlayer.MainCamTr;
+        Vector3 position = playerCamera != null ? playerCamera.position : player.transform.position;
+        return HasRoofOverhead(position);
+    }
+
+    private static void LogIgnitionWarning(Exception exception)
+    {
+        if (_ignitionWarningLogged)
+        {
+            return;
+        }
+
+        _ignitionWarningLogged = true;
+        RLog.Warning($"[RainExtinguishesFires] Ignition check failed, allowing ignition: {exception.Message}");
+    }
+
+    private static bool ShouldBlockIgnition(CookingFireNew fire)
+    {
+        if (!_gameStarted)
+        {
+            return false;
+        }
+
+        bool preventWet = _preventRelightInRain.Value && WetFires.Count > 0;
+        bool blockHeavy = _blockIgnitionInHeavyWeather.Value && _badWeather && _tier == PrecipitationTier.Heavy;
+        if (!preventWet && !blockHeavy)
+        {
+            return false;
+        }
+
+        int id = fire.GetInstanceID();
+        bool wet = preventWet && WetFires.Contains(id);
+        if (!wet && !blockHeavy)
+        {
+            return false;
+        }
+
+        if (HasRoofOverhead(fire.transform.position))
+        {
+            WetFires.Remove(id);
+            PendingWetFires.Remove(id);
+            return false;
+        }
+
+        ShowBlockedMessage(wet ? "The wood is soaked. Find shelter or wait for the weather to clear." : "The rain is too heavy to light a fire out here.");
+        return true;
+    }
+
+    private static void ShowBlockedMessage(string message)
+    {
+        float now = Time.time;
+        if (now - _lastBlockedMessageTime < BlockedMessageCooldown)
+        {
+            return;
+        }
+
+        _lastBlockedMessageTime = now;
+        try
+        {
+            SonsTools.ShowMessage(message, BlockedMessageDuration);
+        }
+        catch (Exception exception)
+        {
+            if (!_messageWarningLogged)
+            {
+                _messageWarningLogged = true;
+                RLog.Warning($"[RainExtinguishesFires] Could not show HUD message: {exception.Message}");
+            }
+        }
     }
 
     private static void VerifyFireHooks()
@@ -348,6 +654,7 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
 
     private static void UpdateLiveState(float deltaTime)
     {
+        float now = Time.time;
         WeatherSystem weather = WeatherSystem.Instance;
         _badWeather = weather != null && (weather.IsRaining || weather.IsSnowing);
         _isAuthority = BoltNetwork.isServerOrNotRunning;
@@ -355,12 +662,25 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
         bool weatherEnded = !_badWeather && _wasBadWeather;
         _wasBadWeather = _badWeather;
 
+        if (_badWeather)
+        {
+            _tier = ReadPrecipitationTier(weather!);
+            _dryElapsed = 0f;
+        }
+        else
+        {
+            _tier = PrecipitationTier.None;
+            _dryElapsed += deltaTime;
+        }
+
         if (weatherEnded)
         {
             Fires.ResetExposure();
         }
 
-        if (_campfireEnabled.Value && _badWeather)
+        UpdateWetLocks(now);
+
+        if (FireExtinguishingEnabled() && _badWeather)
         {
             if (weatherStarted)
             {
@@ -380,6 +700,7 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
 
         bool handheldEnabled = _torchEnabled.Value || _fireArrowsEnabled.Value || _molotovEnabled.Value;
         bool needsPlayerExposure = _rainSicknessEnabled.Value || handheldEnabled;
+        bool playerSheltered = false;
         bool playerExposed = false;
         if (_badWeather && needsPlayerExposure)
         {
@@ -388,11 +709,12 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
             {
                 Transform playerCamera = LocalPlayer.MainCamTr;
                 Vector3 exposurePosition = playerCamera != null ? playerCamera.position : player.transform.position;
-                playerExposed = !HasRoofOverhead(exposurePosition);
+                playerSheltered = HasRoofOverhead(exposurePosition);
+                playerExposed = !playerSheltered;
             }
         }
 
-        UpdateRainSickness(playerExposed, deltaTime);
+        UpdateRainSickness(playerExposed, playerSheltered, deltaTime);
 
         if (handheldEnabled && playerExposed)
         {
@@ -408,6 +730,225 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
         }
     }
 
+    private static bool FireExtinguishingEnabled()
+    {
+        return _campfireEnabled.Value;
+    }
+
+    private static PrecipitationTier ReadPrecipitationTier(WeatherSystem weather)
+    {
+        try
+        {
+            RainTypes rainTypes = WeatherSystem.GetRainTypes();
+            if (rainTypes != null)
+            {
+                PrecipitationTier effectTier = PrecipitationTier.None;
+                if (IsEffectActive(rainTypes.RainHeavy) || IsEffectActive(rainTypes.SnowHeavy))
+                {
+                    effectTier = PrecipitationTier.Heavy;
+                }
+                else if (IsEffectActive(rainTypes.RainMedium) || IsEffectActive(rainTypes.SnowMedium))
+                {
+                    effectTier = PrecipitationTier.Medium;
+                }
+                else if (IsEffectActive(rainTypes.RainLight) || IsEffectActive(rainTypes.SnowLight))
+                {
+                    effectTier = PrecipitationTier.Light;
+                }
+
+                if (effectTier != PrecipitationTier.None)
+                {
+                    return effectTier;
+                }
+            }
+        }
+        catch (Exception)
+        {
+        }
+
+        try
+        {
+            switch (weather.CurrentRainType)
+            {
+                case WeatherSystem.RainType.Light:
+                    return PrecipitationTier.Light;
+                case WeatherSystem.RainType.Medium:
+                    return PrecipitationTier.Medium;
+                case WeatherSystem.RainType.Heavy:
+                    return PrecipitationTier.Heavy;
+            }
+        }
+        catch (Exception)
+        {
+        }
+
+        return PrecipitationTier.None;
+    }
+
+    private static bool IsEffectActive(RainEffectController controller)
+    {
+        return controller != null && controller._effectIsActive;
+    }
+
+    private static float GetPrecipitationTimer()
+    {
+        if (!_useWeatherTiers.Value)
+        {
+            return _fireTimer.Value;
+        }
+
+        return _tier switch
+        {
+            PrecipitationTier.Light => _lightTimer.Value,
+            PrecipitationTier.Heavy => _heavyTimer.Value,
+            _ => _mediumTimer.Value
+        };
+    }
+
+    private static float GetHandheldTimer(float baseTimer)
+    {
+        if (!_useWeatherTiers.Value || !_scaleHandheldsWithTiers.Value)
+        {
+            return baseTimer;
+        }
+
+        float reference = Math.Max(_mediumTimer.Value, 0.01f);
+        return Math.Max(MinimumHandheldTimer, baseTimer * GetPrecipitationTimer() / reference);
+    }
+
+    private static void UpdateWetLocks(float now)
+    {
+        bool precipitationStopped = _dryElapsed >= PrecipitationClearDelay;
+        if (!_preventRelightInRain.Value || precipitationStopped)
+        {
+            ClearWetFires();
+        }
+        else
+        {
+            PromotePendingWetFires(now);
+        }
+
+        if (!_preventHandheldRelightInRain.Value || precipitationStopped)
+        {
+            ClearWetHandhelds();
+        }
+        else
+        {
+            PromotePendingWetHandhelds(now);
+        }
+    }
+
+    private static void PromotePendingWetFires(float now)
+    {
+        if (PendingWetFires.Count == 0)
+        {
+            return;
+        }
+
+        ReadyWetFireIds.Clear();
+        foreach (KeyValuePair<int, float> pending in PendingWetFires)
+        {
+            if (now >= pending.Value)
+            {
+                ReadyWetFireIds.Add(pending.Key);
+            }
+        }
+
+        foreach (int id in ReadyWetFireIds)
+        {
+            PendingWetFires.Remove(id);
+            Tracked<CookingFireNew>? tracked = Fires.TryGet(id);
+            if (tracked != null && tracked.Target != null && tracked.Target.IsLit)
+            {
+                continue;
+            }
+
+            WetFires.Add(id);
+        }
+        ReadyWetFireIds.Clear();
+    }
+
+    private static void PromotePendingWetHandhelds(float now)
+    {
+        if (PendingWetHandhelds.Count == 0)
+        {
+            return;
+        }
+
+        ReadyWetHandhelds.Clear();
+        foreach (KeyValuePair<HandheldKind, float> pending in PendingWetHandhelds)
+        {
+            if (now >= pending.Value)
+            {
+                ReadyWetHandhelds.Add(pending.Key);
+            }
+        }
+
+        foreach (HandheldKind kind in ReadyWetHandhelds)
+        {
+            PendingWetHandhelds.Remove(kind);
+            WetHandhelds.Add(kind);
+        }
+        ReadyWetHandhelds.Clear();
+    }
+
+    private static void MarkFireWet(int id)
+    {
+        if (!_preventRelightInRain.Value)
+        {
+            return;
+        }
+
+        if (IsInWarmGracePeriod())
+        {
+            PendingWetFires[id] = Time.time + _warmGracePeriod.Value;
+            return;
+        }
+
+        PendingWetFires.Remove(id);
+        WetFires.Add(id);
+    }
+
+    private static void MarkHandheldWet(HandheldKind kind)
+    {
+        if (!_preventHandheldRelightInRain.Value)
+        {
+            return;
+        }
+
+        if (IsInWarmGracePeriod())
+        {
+            PendingWetHandhelds[kind] = Time.time + _warmGracePeriod.Value;
+            return;
+        }
+
+        PendingWetHandhelds.Remove(kind);
+        WetHandhelds.Add(kind);
+    }
+
+    private static void ClearHandheldWet(HandheldKind kind)
+    {
+        WetHandhelds.Remove(kind);
+        PendingWetHandhelds.Remove(kind);
+    }
+
+    private static bool IsInWarmGracePeriod()
+    {
+        return _tier == PrecipitationTier.Light && _warmGracePeriod.Value > 0f;
+    }
+
+    private static void ClearWetFires()
+    {
+        WetFires.Clear();
+        PendingWetFires.Clear();
+    }
+
+    private static void ClearWetHandhelds()
+    {
+        WetHandhelds.Clear();
+        PendingWetHandhelds.Clear();
+    }
+
     private static void RefreshFallbackFires(float deltaTime)
     {
         _fallbackFireScanElapsed += deltaTime;
@@ -421,18 +962,28 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
         _fallbackFireScanPending = false;
     }
 
-    private static void UpdateRainSickness(bool exposed, float deltaTime)
+    private static void UpdateRainSickness(bool exposed, bool sheltered, float deltaTime)
     {
-        if (!_rainSicknessEnabled.Value)
+        if (!_rainSicknessEnabled.Value || !_badWeather)
         {
             _rainSicknessExposure = 0f;
             return;
         }
 
         Vitals vitals = LocalPlayer.Vitals;
-        if (vitals == null || !exposed || vitals.IsSick)
+        if (vitals == null)
+        {
+            return;
+        }
+
+        if (vitals.IsSick)
         {
             _rainSicknessExposure = 0f;
+            return;
+        }
+
+        if (sheltered || !exposed)
+        {
             return;
         }
 
@@ -445,9 +996,9 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
         }
     }
 
-    private static void UpdateCampfireSlice(float now)
+    private static void UpdateFireSlice(float now)
     {
-        if (!_campfireEnabled.Value || !_badWeather)
+        if (!_badWeather || !FireExtinguishingEnabled())
         {
             return;
         }
@@ -489,7 +1040,33 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
         tracked.LastCheck = now;
         tracked.NextCheck = now + FireCheckInterval;
 
-        if (!fire.IsLit || HasRoofOverhead(fire.transform.position))
+        if (!_campfireEnabled.Value)
+        {
+            tracked.Exposure = 0f;
+            tracked.Done = false;
+            return;
+        }
+
+        int id = tracked.Id;
+        if (!fire.IsLit)
+        {
+            tracked.Exposure = 0f;
+            tracked.Done = false;
+            if ((WetFires.Contains(id) || PendingWetFires.ContainsKey(id)) && HasRoofOverhead(fire.transform.position))
+            {
+                WetFires.Remove(id);
+                PendingWetFires.Remove(id);
+            }
+            return;
+        }
+
+        if (!tracked.Done)
+        {
+            WetFires.Remove(id);
+            PendingWetFires.Remove(id);
+        }
+
+        if (HasRoofOverhead(fire.transform.position))
         {
             tracked.Exposure = 0f;
             tracked.Done = false;
@@ -502,19 +1079,137 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
         }
 
         tracked.Exposure += step;
-        if (tracked.Exposure < _fireTimer.Value)
+        float requiredTime = GetPrecipitationTimer();
+        if (_stoneRingMultiplier.Value > 1.001f && HasFullStoneRing(tracked, fire, now))
+        {
+            requiredTime *= _stoneRingMultiplier.Value;
+        }
+
+        if (tracked.Exposure < requiredTime)
         {
             return;
         }
 
         tracked.Exposure = 0f;
         tracked.Done = true;
-        if (_isAuthority)
+        MarkFireWet(id);
+        if (!_isAuthority)
         {
-            fire.SetPutOut();
-            PlayExtinguishSound();
-            RLog.Msg($"[RainExtinguishesFires] Fire {tracked.Id} extinguished by rain/snow.");
+            return;
         }
+
+        PlaySmokePuff(fire);
+        fire.SetPutOut();
+        PlayExtinguishSound();
+        RLog.Msg($"[RainExtinguishesFires] Fire {id} extinguished by rain/snow ({_tier}).");
+    }
+
+    private static bool HasFullStoneRing(Tracked<CookingFireNew> tracked, CookingFireNew fire, float now)
+    {
+        if (now < tracked.NextStoneCheck)
+        {
+            return tracked.StoneRing;
+        }
+
+        tracked.NextStoneCheck = now + StoneRingRefreshInterval;
+        tracked.StoneRing = false;
+        try
+        {
+            FireStructure structure = fire.GetComponentInParent<FireStructure>();
+            if (structure == null)
+            {
+                return false;
+            }
+
+            structure.CalcElementCounts(out int _, out int _, out int reinforcementElements);
+            PresetElementsTemplate template = structure.Construction_IReinforceableStructure_GetReinforcementTemplate();
+            int maximum = template != null ? template.ElementCount : 0;
+            tracked.StoneRing = maximum > 0 && reinforcementElements >= maximum;
+        }
+        catch (Exception exception)
+        {
+            if (!_stoneRingWarningLogged)
+            {
+                _stoneRingWarningLogged = true;
+                RLog.Warning($"[RainExtinguishesFires] Could not read campfire stones, stone ring bonus disabled for that fire: {exception.Message}");
+            }
+        }
+        return tracked.StoneRing;
+    }
+
+    private static void PlaySmokePuff(CookingFireNew fire)
+    {
+        if (!_smokeEffectEnabled.Value)
+        {
+            return;
+        }
+
+        try
+        {
+            ParticleSystem? template = FindSmokeTemplate(fire.transform);
+            Transform parent = fire.transform.parent;
+            if (template == null && parent != null)
+            {
+                template = FindSmokeTemplate(parent);
+            }
+
+            if (template == null)
+            {
+                string name = fire.name;
+                if (LoggedSmokeMisses.Add(name))
+                {
+                    RLog.Msg($"[RainExtinguishesFires] No smoke particles found on '{name}', skipping smoke puff.");
+                }
+                return;
+            }
+
+            Transform source = template.transform;
+            GameObject copy = UnityEngine.Object.Instantiate(template.gameObject, source.position, source.rotation);
+            copy.SetActive(true);
+            ParticleSystem[] systems = copy.GetComponentsInChildren<ParticleSystem>(true);
+            foreach (ParticleSystem system in systems)
+            {
+                system.gameObject.SetActive(true);
+                ParticleSystem.MainModule main = system.main;
+                main.loop = false;
+                system.Stop(true, ParticleSystemStopBehavior.StopEmittingAndClear);
+                system.Emit(SmokeBurstCount);
+            }
+            UnityEngine.Object.Destroy(copy, SmokeLifetime);
+        }
+        catch (Exception exception)
+        {
+            if (!_smokeWarningLogged)
+            {
+                _smokeWarningLogged = true;
+                RLog.Warning($"[RainExtinguishesFires] Could not play smoke puff: {exception.Message}");
+            }
+        }
+    }
+
+    private static ParticleSystem? FindSmokeTemplate(Transform root)
+    {
+        ParticleSystem[] systems = root.GetComponentsInChildren<ParticleSystem>(true);
+        ParticleSystem? smoke = null;
+        foreach (ParticleSystem system in systems)
+        {
+            if (system == null)
+            {
+                continue;
+            }
+
+            string name = system.name.ToLowerInvariant();
+            if (name.Contains("steam"))
+            {
+                return system;
+            }
+
+            if (smoke == null && name.Contains("smoke"))
+            {
+                smoke = system;
+            }
+        }
+        return smoke;
     }
 
     private static void UpdateHandheldItems(bool exposed, float deltaTime)
@@ -578,9 +1273,15 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
             return;
         }
 
-        if (Accumulate(TorchExposureTimes, id, deltaTime, _torchTimer.Value))
+        if (!TorchExposureTimes.ContainsKey(id))
+        {
+            ClearHandheldWet(HandheldKind.Torch);
+        }
+
+        if (Accumulate(TorchExposureTimes, id, deltaTime, GetHandheldTimer(_torchTimer.Value)))
         {
             torch.OnSprinklersInfluenceCountChanged(1);
+            MarkHandheldWet(HandheldKind.Torch);
             PlayExtinguishSound();
         }
     }
@@ -620,9 +1321,15 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
             return;
         }
 
-        if (Accumulate(MolotovExposureTimes, id, deltaTime, _molotovTimer.Value))
+        if (!MolotovExposureTimes.ContainsKey(id))
+        {
+            ClearHandheldWet(HandheldKind.Molotov);
+        }
+
+        if (Accumulate(MolotovExposureTimes, id, deltaTime, GetHandheldTimer(_molotovTimer.Value)))
         {
             molotov.OnSprinklersInfluenceCountChanged(1);
+            MarkHandheldWet(HandheldKind.Molotov);
             PlayExtinguishSound();
         }
     }
@@ -649,6 +1356,7 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
                 }
             }
 
+            float arrowTimer = GetHandheldTimer(_fireArrowTimer.Value);
             List<Tracked<FireArrowController>> arrows = FireArrows.Items;
             for (int i = arrows.Count - 1; i >= 0; i--)
             {
@@ -673,12 +1381,18 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
                     continue;
                 }
 
-                if (!Accumulate(FireArrowExposureTimes, id, deltaTime, _fireArrowTimer.Value))
+                if (!FireArrowExposureTimes.ContainsKey(id))
+                {
+                    ClearHandheldWet(HandheldKind.FireArrow);
+                }
+
+                if (!Accumulate(FireArrowExposureTimes, id, deltaTime, arrowTimer))
                 {
                     continue;
                 }
 
                 arrow.OnSprinklersInfluenceCountChanged(1);
+                MarkHandheldWet(HandheldKind.FireArrow);
                 PlayExtinguishSound();
             }
         }
@@ -758,6 +1472,8 @@ internal sealed class Tracked<T> where T : UnityEngine.Object
     public float LastCheck;
     public float NextCheck;
     public bool Done;
+    public bool StoneRing;
+    public float NextStoneCheck;
 
     public Tracked(T target, int id)
     {
@@ -801,6 +1517,11 @@ internal sealed class ComponentRegistry<T> where T : UnityEngine.Object
         }
 
         RemoveId(target.GetInstanceID());
+    }
+
+    public Tracked<T>? TryGet(int id)
+    {
+        return _byId.TryGetValue(id, out Tracked<T>? tracked) ? tracked : null;
     }
 
     public void RemoveAt(int index)

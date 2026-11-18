@@ -3,10 +3,10 @@
     <TargetFramework>net11.0</TargetFramework>
     <AssemblyName>RainExtinguishesFires</AssemblyName>
     <RootNamespace>RainExtinguishesFires</RootNamespace>
-    <Version>1.1.1</Version>
-    <AssemblyVersion>1.1.1.0</AssemblyVersion>
-    <FileVersion>1.1.1.0</FileVersion>
-    <InformationalVersion>1.1.1</InformationalVersion>
+    <Version>1.2.0</Version>
+    <AssemblyVersion>1.2.0.0</AssemblyVersion>
+    <FileVersion>1.2.0.0</FileVersion>
+    <InformationalVersion>1.2.0</InformationalVersion>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
     <AppendTargetFrameworkToOutputPath>true</AppendTargetFrameworkToOutputPath>
@@ -47,6 +47,18 @@
     </Reference>
     <Reference Include="UnityEngine.AudioModule">
       <HintPath>$(GameDir)\BepInEx\interop\UnityEngine.AudioModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.ParticleSystemModule">
+      <HintPath>$(GameDir)\BepInEx\interop\UnityEngine.ParticleSystemModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Sons.Atmosphere">
+      <HintPath>$(GameDir)\BepInEx\interop\Sons.Atmosphere.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Sons.Interfaces">
+      <HintPath>$(GameDir)\BepInEx\interop\Sons.Interfaces.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="Sons.Construction">

@@ -3,7 +3,7 @@
   "id": "RainExtinguishesFires",
   "name": "Rain Extinguishes Fires",
   "author": "Zemo",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "Extinguishes unsheltered fires in rain or snow with custom sound effects, configurable timers, and optional rain sickness and handheld flame extinguishing.",
   "gameVersion": "1.0.0",
   "type": "Mod",
