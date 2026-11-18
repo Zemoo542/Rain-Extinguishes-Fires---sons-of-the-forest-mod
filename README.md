@@ -76,4 +76,19 @@ Settings are stored in `UserData/RainExtinguishesFires/` and can be changed from
 - Removed a one-time diagnostic scan and preloaded the extinguish sound when the game starts.
 
 ### 1.1.0
-- Initial public release.
+- Added configs (located in UserData) with toggles and timers.
+- Added a custom toggleable extinguish sound effect when fires or items are put out (on by default).
+- Added configurable Campfire Extinguishing toggle and timer slider (1s – 60s, default 5s).
+- Added optional Rain Sickness toggle and exposure timer slider (10s – 300s, off by default).
+- Added optional extinguishing for Handheld Torches, Fire Arrows, and Held Molotovs with individual timers (off by default).
+
+Known Issues:
+
+Occasional minor stutters may occur during rain; this is being looked into for a future update.
+
+### 1.0.0
+- Initial release.
+- Automatically extinguishes campfires and fires after 5 seconds of uninterrupted exposure to rain or snow.
+- Checks for overhead roofs and shelters via raycasting to keep covered fires burning.
+- Fully compatible with multiplayer (host-only required, untested but should be compatible).
+- Safe to install and remove at any time without impacting save games.
