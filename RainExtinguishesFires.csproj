@@ -1,12 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net11.0</TargetFramework>
+    <TargetFramework>net6.0</TargetFramework>
     <AssemblyName>RainExtinguishesFires</AssemblyName>
     <RootNamespace>RainExtinguishesFires</RootNamespace>
-    <Version>1.3.0</Version>
-    <AssemblyVersion>1.3.0.0</AssemblyVersion>
-    <FileVersion>1.3.0.0</FileVersion>
-    <InformationalVersion>1.3.0</InformationalVersion>
+    <Version>1.3.1</Version>
+    <AssemblyVersion>1.3.1.0</AssemblyVersion>
+    <FileVersion>1.3.1.0</FileVersion>
+    <InformationalVersion>1.3.1</InformationalVersion>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
     <AppendTargetFrameworkToOutputPath>true</AppendTargetFrameworkToOutputPath>
@@ -18,79 +18,79 @@
 
   <ItemGroup>
     <Reference Include="RedLoader">
-      <HintPath>$(GameDir)\Modstoke\Runtime\Compatibility\RedLoader.dll</HintPath>
+      <HintPath>$(GameDir)\_Redloader\net6\RedLoader.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="SonsSdk">
-      <HintPath>$(GameDir)\Modstoke\Runtime\Compatibility\SonsSdk.dll</HintPath>
+      <HintPath>$(GameDir)\_Redloader\net6\SonsSdk.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="FMOD.Unity">
-      <HintPath>$(GameDir)\BepInEx\interop\FMOD.Unity.dll</HintPath>
+      <HintPath>$(GameDir)\_Redloader\Game\FMOD.Unity.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="0Harmony">
-      <HintPath>$(GameDir)\BepInEx\core\0Harmony.dll</HintPath>
+      <HintPath>$(GameDir)\_Redloader\net6\0Harmony.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="Il2CppInterop.Runtime">
-      <HintPath>$(GameDir)\BepInEx\core\Il2CppInterop.Runtime.dll</HintPath>
+      <HintPath>$(GameDir)\_Redloader\net6\Il2CppInterop.Runtime.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.CoreModule">
-      <HintPath>$(GameDir)\BepInEx\interop\UnityEngine.CoreModule.dll</HintPath>
+      <HintPath>$(GameDir)\_Redloader\Game\UnityEngine.CoreModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.PhysicsModule">
-      <HintPath>$(GameDir)\BepInEx\interop\UnityEngine.PhysicsModule.dll</HintPath>
+      <HintPath>$(GameDir)\_Redloader\Game\UnityEngine.PhysicsModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.AudioModule">
-      <HintPath>$(GameDir)\BepInEx\interop\UnityEngine.AudioModule.dll</HintPath>
+      <HintPath>$(GameDir)\_Redloader\Game\UnityEngine.AudioModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.ParticleSystemModule">
-      <HintPath>$(GameDir)\BepInEx\interop\UnityEngine.ParticleSystemModule.dll</HintPath>
+      <HintPath>$(GameDir)\_Redloader\Game\UnityEngine.ParticleSystemModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="Sons.Atmosphere">
-      <HintPath>$(GameDir)\BepInEx\interop\Sons.Atmosphere.dll</HintPath>
+      <HintPath>$(GameDir)\_Redloader\Game\Sons.Atmosphere.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="Sons.Interfaces">
-      <HintPath>$(GameDir)\BepInEx\interop\Sons.Interfaces.dll</HintPath>
+      <HintPath>$(GameDir)\_Redloader\Game\Sons.Interfaces.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="Sons.FMOD">
-      <HintPath>$(GameDir)\BepInEx\interop\Sons.FMOD.dll</HintPath>
+      <HintPath>$(GameDir)\_Redloader\Game\Sons.FMOD.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="Endnight">
-      <HintPath>$(GameDir)\BepInEx\interop\Endnight.dll</HintPath>
+      <HintPath>$(GameDir)\_Redloader\Game\Endnight.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.IMGUIModule">
-      <HintPath>$(GameDir)\BepInEx\interop\UnityEngine.IMGUIModule.dll</HintPath>
+      <HintPath>$(GameDir)\_Redloader\Game\UnityEngine.IMGUIModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.TextRenderingModule">
-      <HintPath>$(GameDir)\BepInEx\interop\UnityEngine.TextRenderingModule.dll</HintPath>
+      <HintPath>$(GameDir)\_Redloader\Game\UnityEngine.TextRenderingModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="Sons.Construction">
-      <HintPath>$(GameDir)\BepInEx\interop\Sons.Construction.dll</HintPath>
+      <HintPath>$(GameDir)\_Redloader\Game\Sons.Construction.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="Sons">
-      <HintPath>$(GameDir)\BepInEx\interop\Sons.dll</HintPath>
+      <HintPath>$(GameDir)\_Redloader\Game\Sons.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="bolt">
-      <HintPath>$(GameDir)\BepInEx\interop\bolt.dll</HintPath>
+      <HintPath>$(GameDir)\_Redloader\Game\bolt.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="Il2Cppmscorlib">
-      <HintPath>$(GameDir)\BepInEx\interop\Il2Cppmscorlib.dll</HintPath>
+      <HintPath>$(GameDir)\_Redloader\Game\Il2Cppmscorlib.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>
@@ -108,6 +108,6 @@
 
   <Target Name="ValidateGameDir" BeforeTargets="ResolveReferences">
     <Error Condition="'$(GameDir)' == ''" Text="Set SOTF_GAME_DIR or pass -p:GameDir to the Sons of the Forest install directory." />
-    <Error Condition="!Exists('$(GameDir)\BepInEx\interop\Sons.dll')" Text="GameDir must point to a Sons of the Forest install containing BepInEx/interop/Sons.dll." />
+    <Error Condition="!Exists('$(GameDir)\_Redloader\Game\Sons.dll')" Text="GameDir must point to a Sons of the Forest install containing _Redloader/Game/Sons.dll." />
   </Target>
 </Project>

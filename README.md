@@ -4,9 +4,9 @@ RedLoader mod source for Sons of the Forest.
 
 ## Build
 
-Install the game's RedLoader/BepInEx interop files, then set `SOTF_GAME_DIR` to the game installation directory or pass `-p:GameDir=<game-directory>` to `dotnet build`.
+Install RedLoader and launch the game once so it generates `_Redloader/Game`, then set `SOTF_GAME_DIR` to the game installation directory or pass `-p:GameDir=<game-directory>` to `dotnet build`.
 
-The project targets `net11.0`, matching the bundled Modstoke runtime. Release builds omit debug symbols so the generated DLL does not carry a local PDB path.
+The project targets `net6.0`, matching the RedLoader runtime. Release builds omit debug symbols so the generated DLL does not carry a local PDB path.
 
 ## Mod files
 
@@ -76,6 +76,9 @@ Settings are stored in `UserData/RainExtinguishesFires/` and can be changed from
 | `PreventHandheldRelightInRain` | `true` | | Torches, molotovs and fire arrows put out by the weather cannot be relit while the player is unsheltered until the rain or snow stops. Uses the same light-rain grace period as campfires. |
 
 ## Changelog
+
+### 1.3.1
+- Rebuilt for .NET 6 so the mod loads on standard RedLoader. The previous build targeted a newer .NET and could stop RedLoader from loading other mods.
 
 ### 1.3.0
 - Added still-warm embers: during the light-rain grace period, a campfire that just went out gives off the fire's own small floating embers and sizzles using the game's campfire sound at a slightly higher volume. Enabled automatically with `PreventRelightInRain`.
