@@ -32,6 +32,7 @@ internal enum FuelKind
 {
     Other,
     Firewood,
+    BonfireLog,
     Leaves
 }
 
@@ -64,7 +65,7 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
     private const float IgnitionCommitWindow = 8f;
     private const float EmberMaxStartSize = 0.15f;
     private const float EmberEmissionScale = 0.6f;
-    private const float PopupDuration = 3f;
+    private const float BlockedMessageDuration = 2.5f;
     private const float FuelRefreshInterval = 10f;
     private const float LeafStokeMinimumCooldown = 5f;
     private const float WindCheckDistance = 10f;
@@ -72,7 +73,13 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
     private const float MinimumWindIntensity = 0.05f;
     private const float SizzleVolume = 1.3f;
     private const int MaxLoggedNames = 32;
-    private const int DefaultMaxFuelElements = 6;
+    private const int FullSmallFirewoodPieces = 4;
+    private const int BonfireLayerOnePieces = 2;
+    private const int BonfireLayerTwoPieces = 6;
+    private const float TarpRefreshInterval = 5f;
+    private const float TarpSearchHeight = 2f;
+    private const float TarpSearchRadius = 3.5f;
+    private const float TarpEdgeMargin = 0.25f;
     private static readonly string[] EmberParticleTokens = { "ember", "spark", "glow", "coal" };
     private static readonly string[] SizzleExcludedTokens = { "tree", "metal", "gun", "mutant", "player", "molotov", "torch", "arrow", "flare", "propogate", "extinguish", "whoosh", "shoosh", "quench", "flamer", "alarm", "craft" };
     private static readonly Dictionary<int, float> TorchExposureTimes = new();
@@ -92,11 +99,12 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
     private static readonly HashSet<string> LoggedFuelNames = new();
     private static readonly List<SprinklerReset> SprinklerResets = new();
     private static readonly Dictionary<int, float> FireIgnitionAllowances = new();
+    private static readonly Dictionary<int, TarpCheck> TarpChecks = new();
+    private static readonly HashSet<int> TarpCandidateIds = new();
     private static readonly Dictionary<HandheldKind, float> HandheldIgnitionAllowances = new();
     private static readonly HashSet<string> LoggedParticleNames = new();
-    private static string _popupMessage = string.Empty;
-    private static float _popupUntil;
-    private static GUIStyle? _popupStyle;
+    private static string _lastBlockedMessage = string.Empty;
+    private static GameObject? _torchWarmRoot;
     private static readonly Dictionary<int, WarmEffect> WarmEffects = new();
     private static readonly List<int> WarmEffectIds = new();
     private static readonly ComponentRegistry<CookingFireNew> Fires = new();
@@ -131,7 +139,6 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
     private static bool _windWarningLogged;
     private static bool _sizzlePathResolved;
     private static string? _sizzleEventPath;
-    private static int _maxFuelElements;
     private static ConfigEntry<bool> _campfireEnabled = null!;
     private static ConfigEntry<float> _fireTimer = null!;
     private static ConfigEntry<bool> _playExtinguishSound = null!;
@@ -151,6 +158,13 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
     private static ConfigEntry<bool> _windFactorEnabled = null!;
     private static ConfigEntry<bool> _firewoodBonusEnabled = null!;
     private static ConfigEntry<float> _firewoodMultiplier = null!;
+    private static ConfigEntry<float> _stoneRingFirewoodMultiplier = null!;
+    private static ConfigEntry<bool> _logLayerBonusEnabled = null!;
+    private static ConfigEntry<float> _oneLogLayerMultiplier = null!;
+    private static ConfigEntry<float> _stoneRingOneLogLayerMultiplier = null!;
+    private static ConfigEntry<float> _twoLogLayersMultiplier = null!;
+    private static ConfigEntry<float> _stoneRingTwoLogLayersMultiplier = null!;
+    private static ConfigEntry<bool> _stoneRingBonfireNeverExtinguishes = null!;
     private static ConfigEntry<bool> _wetFirewoodPenaltyEnabled = null!;
     private static ConfigEntry<bool> _leafStokeEnabled = null!;
     private static ConfigEntry<float> _leafStokeSeconds = null!;
@@ -178,7 +192,6 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
         InitializeConfig();
         InitializeAudio();
         InitializeHooks();
-        GlobalEvents.OnGUI.Subscribe(DrawBlockedPopup);
         RLog.Msg("[RainExtinguishesFires] Mod initialized.");
     }
 
@@ -195,6 +208,7 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
         SprinklerResets.Clear();
         FireIgnitionAllowances.Clear();
         HandheldIgnitionAllowances.Clear();
+        TarpChecks.Clear();
     }
 
     protected override void OnGameStart()
@@ -209,6 +223,7 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
         SprinklerResets.Clear();
         FireIgnitionAllowances.Clear();
         HandheldIgnitionAllowances.Clear();
+        TarpChecks.Clear();
         _dryElapsed = PrecipitationClearDelay;
         Fires.PruneDestroyed();
         FireArrows.PruneDestroyed();
@@ -263,7 +278,7 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
         _lightTimer = CreateEntry(weatherTiers, "LightPrecipitationTimer", "Light Precipitation Timer", 15f, 1f, 60f);
         _mediumTimer = CreateEntry(weatherTiers, "MediumPrecipitationTimer", "Medium Precipitation Timer", 5f, 1f, 60f);
         _heavyTimer = CreateEntry(weatherTiers, "HeavyPrecipitationTimer", "Heavy Precipitation Timer", 2f, 1f, 60f);
-        _scaleHandheldsWithTiers = CreateEntry(weatherTiers, "ScaleHandheldsWithWeatherTiers", "Scale Handhelds With Weather Tiers", false);
+        _scaleHandheldsWithTiers = CreateEntry(weatherTiers, "ScaleHandheldsWithWeatherTiers", "Scale Handhelds With Weather Tiers", true, "Only takes effect when UseWeatherIntensityTiers is on.");
 
         _preventRelightInRain = CreateEntry(wetFires, "PreventRelightInRain", "Prevent Relight In Rain", false);
         _warmGracePeriod = CreateEntry(wetFires, "LightRainWarmGracePeriod", "Light Rain Warm Grace Period", 3f, 0f, 15f);
@@ -274,7 +289,14 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
         _windFactorEnabled = CreateEntry(shelter, "WindDirectionFactor", "Wind Direction Factor", false);
 
         _firewoodBonusEnabled = CreateEntry(fuel, "FirewoodResistanceBonus", "Firewood Resistance Bonus", true);
-        _firewoodMultiplier = CreateEntry(fuel, "FirewoodResistanceMultiplier", "Firewood Resistance Multiplier", 2f, 1f, 3f);
+        _firewoodMultiplier = CreateEntry(fuel, "FirewoodResistanceMultiplier", "Firewood Resistance Multiplier", 2f, 1f, 10f);
+        _stoneRingFirewoodMultiplier = CreateEntry(fuel, "StoneRingFirewoodMultiplier", "Stone Ring Firewood Multiplier", 3f, 1f, 10f);
+        _logLayerBonusEnabled = CreateEntry(fuel, "LogLayerBonus", "Log Layer Bonus", true);
+        _oneLogLayerMultiplier = CreateEntry(fuel, "OneLogLayerMultiplier", "One Log Layer Multiplier", 3.5f, 1f, 10f);
+        _stoneRingOneLogLayerMultiplier = CreateEntry(fuel, "StoneRingOneLogLayerMultiplier", "Stone Ring One Log Layer Multiplier", 4f, 1f, 10f);
+        _twoLogLayersMultiplier = CreateEntry(fuel, "TwoLogLayersMultiplier", "Two Log Layers Multiplier", 5f, 1f, 10f);
+        _stoneRingBonfireNeverExtinguishes = CreateEntry(fuel, "StoneRingBonfireNeverExtinguishes", "Stone Ring Bonfire Never Extinguishes", true);
+        _stoneRingTwoLogLayersMultiplier = CreateEntry(fuel, "StoneRingTwoLogLayersMultiplier", "Stone Ring Two Log Layers Multiplier", 6f, 1f, 10f, "Only takes effect when StoneRingBonfireNeverExtinguishes is off.");
         _wetFirewoodPenaltyEnabled = CreateEntry(fuel, "WetFirewoodPenalty", "Wet Firewood Penalty", false);
         _leafStokeEnabled = CreateEntry(fuel, "LeafStokeExtension", "Leaf Stoke Extension", false);
         _leafStokeSeconds = CreateEntry(fuel, "LeafStokeSeconds", "Leaf Stoke Seconds", 1f, 0.5f, 5f);
@@ -288,7 +310,7 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
         _fireArrowTimer = CreateEntry(handheld, "FireArrowTimer", "Fire Arrow Timer", 5f, 1f, 30f);
         _molotovEnabled = CreateEntry(handheld, "ExtinguishHeldMolotovs", "Extinguish Held Molotovs", false);
         _molotovTimer = CreateEntry(handheld, "HeldMolotovTimer", "Held Molotov Timer", 3f, 1f, 30f);
-        _preventHandheldRelightInRain = CreateEntry(handheld, "PreventHandheldRelightInRain", "Prevent Handheld Relight In Rain", true);
+        _preventHandheldRelightInRain = CreateEntry(handheld, "PreventHandheldRelightInRain", "Prevent Handheld Relight In Rain", false);
 
         campfires.LoadFromFile(false);
         weatherTiers.LoadFromFile(false);
@@ -310,14 +332,14 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
         return ConfigSystem.CreateFileCategory($"RainExtinguishesFires_{id}", displayName, fileName);
     }
 
-    private static ConfigEntry<T> CreateEntry<T>(ConfigCategory category, string id, string displayName, T defaultValue)
+    private static ConfigEntry<T> CreateEntry<T>(ConfigCategory category, string id, string displayName, T defaultValue, string? description = null)
     {
-        return category.CreateEntry(id, defaultValue, displayName, displayName);
+        return category.CreateEntry(id, defaultValue, displayName, description ?? displayName);
     }
 
-    private static ConfigEntry<float> CreateEntry(ConfigCategory category, string id, string displayName, float defaultValue, float minimum, float maximum)
+    private static ConfigEntry<float> CreateEntry(ConfigCategory category, string id, string displayName, float defaultValue, float minimum, float maximum, string? description = null)
     {
-        var entry = category.CreateEntry(id, defaultValue, displayName, displayName);
+        var entry = category.CreateEntry(id, defaultValue, displayName, description ?? displayName);
         entry.SetRange(minimum, maximum);
         return entry;
     }
@@ -388,10 +410,18 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
         {
             handheldHooks++;
         }
+        if (TryPatchPrefix(typeof(PlasmaLighterController), "OnLightHeldItem", nameof(BeforeLighterLightHeldItem)))
+        {
+            handheldHooks++;
+        }
+        if (TryPatchPrefix(typeof(BowWeaponController), "OnLightHeldItem", nameof(BeforeBowLightHeldItem)))
+        {
+            handheldHooks++;
+        }
 
         bool fuelHook = TryPatchPostfix(typeof(CookingFireNew), "RegisterFuelSource", nameof(OnFuelSourceRegistered));
 
-        RLog.Msg($"[RainExtinguishesFires] Fire tracking hooks: fires={_fireHooksActive}, fireArrows={_fireArrowHooksActive}, ignition={ignitionHooks}/5, handheldIgnition={handheldHooks}/6, fuel={fuelHook}.");
+        RLog.Msg($"[RainExtinguishesFires] Fire tracking hooks: fires={_fireHooksActive}, fireArrows={_fireArrowHooksActive}, ignition={ignitionHooks}/5, handheldIgnition={handheldHooks}/8, fuel={fuelHook}.");
     }
 
     private static bool TryPatchLifecycle(Type targetType, string enabledPostfix, string disabledPostfix)
@@ -488,6 +518,7 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
             return;
         }
 
+        TarpChecks.Remove(__instance.GetInstanceID());
         Fires.Remove(__instance);
     }
 
@@ -608,11 +639,16 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
         return AllowHandheldIgnition(HandheldKind.FireArrow, false);
     }
 
+    private static bool BeforeBowLightHeldItem()
+    {
+        return AllowHandheldIgnition(HandheldKind.FireArrow, true);
+    }
+
     private static bool BeforeLighterLightHeldItem()
     {
         try
         {
-            if (!_gameStarted || !_preventHandheldRelightInRain.Value || WetHandhelds.Count == 0)
+            if (!_gameStarted || !_preventHandheldRelightInRain.Value)
             {
                 return true;
             }
@@ -767,49 +803,25 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
     private static void ShowBlockedMessage(string message)
     {
         float now = Time.time;
-        if (now - _lastBlockedMessageTime < BlockedMessageCooldown && message == _popupMessage)
+        if (now - _lastBlockedMessageTime < BlockedMessageCooldown && message == _lastBlockedMessage)
         {
             return;
         }
 
         _lastBlockedMessageTime = now;
-        _popupMessage = message;
-        _popupUntil = Time.unscaledTime + PopupDuration;
+        _lastBlockedMessage = message;
         RLog.Msg($"[RainExtinguishesFires] Blocked ignition: {message}");
-    }
-
-    private static void DrawBlockedPopup()
-    {
-        if (_popupMessage.Length == 0 || Time.unscaledTime > _popupUntil)
-        {
-            return;
-        }
-
         try
         {
-            if (_popupStyle == null)
-            {
-                _popupStyle = new GUIStyle(GUI.skin.box)
-                {
-                    fontSize = 18,
-                    wordWrap = true,
-                    alignment = TextAnchor.MiddleCenter
-                };
-                _popupStyle.normal.textColor = new Color(1f, 0.85f, 0.6f, 1f);
-            }
-
-            float width = Math.Min(460f, Screen.width * 0.4f);
-            Rect rect = new(Screen.width - width - 24f, 24f, width, 64f);
-            GUI.Box(rect, _popupMessage, _popupStyle);
+            SonsTools.ShowMessage(message, BlockedMessageDuration);
         }
         catch (Exception exception)
         {
             if (!_messageWarningLogged)
             {
                 _messageWarningLogged = true;
-                RLog.Warning($"[RainExtinguishesFires] Could not draw popup: {exception.Message}");
+                RLog.Warning($"[RainExtinguishesFires] Could not show HUD message: {exception.Message}");
             }
-            _popupMessage = string.Empty;
         }
     }
 
@@ -1163,6 +1175,10 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
         {
             PendingWetHandhelds.Remove(kind);
             WetHandhelds.Add(kind);
+            if (kind == HandheldKind.Torch)
+            {
+                StopTorchWarmEffect();
+            }
         }
         ReadyWetHandhelds.Clear();
     }
@@ -1191,7 +1207,7 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
         StopWarmEffect(id);
     }
 
-    private static void MarkHandheldWet(HandheldKind kind)
+    private static void MarkHandheldWet(HandheldKind kind, TorchWeaponController? torch = null)
     {
         if (!_preventHandheldRelightInRain.Value)
         {
@@ -1201,6 +1217,10 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
         if (IsInWarmGracePeriod())
         {
             PendingWetHandhelds[kind] = Time.time + _warmGracePeriod.Value;
+            if (kind == HandheldKind.Torch && torch != null)
+            {
+                StartTorchWarmEffect(torch);
+            }
             return;
         }
 
@@ -1212,6 +1232,10 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
     {
         WetHandhelds.Remove(kind);
         PendingWetHandhelds.Remove(kind);
+        if (kind == HandheldKind.Torch)
+        {
+            StopTorchWarmEffect();
+        }
     }
 
     private static bool IsInWarmGracePeriod()
@@ -1230,6 +1254,7 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
     {
         WetHandhelds.Clear();
         PendingWetHandhelds.Clear();
+        StopTorchWarmEffect();
     }
 
     private static void RefreshFallbackFires(float deltaTime)
@@ -1349,7 +1374,7 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
             RemovePendingWetFire(id);
         }
 
-        if (IsFireSheltered(fire))
+        if (IsWeatherproofBonfire(tracked, fire, now) || IsFireSheltered(fire))
         {
             tracked.Exposure = 0f;
             tracked.Done = false;
@@ -1384,24 +1409,20 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
 
     private static float GetFireResistance(Tracked<CookingFireNew> tracked, CookingFireNew fire, float now)
     {
+        bool stoneRing = _stoneRingEnabled.Value && HasFullStoneRing(tracked, fire, now);
         float resistance = 1f;
-        if (_stoneRingEnabled.Value && _stoneRingMultiplier.Value > 1.001f && HasFullStoneRing(tracked, fire, now))
+        float fuelMultiplier = GetFuelMultiplier(tracked, fire, now, stoneRing);
+        if (fuelMultiplier > 0f)
         {
-            resistance *= _stoneRingMultiplier.Value;
-        }
-
-        if (_firewoodBonusEnabled.Value && _firewoodMultiplier.Value > 1.001f)
-        {
-            RefreshFuel(tracked, fire, now, false);
-            if (tracked.FullFirewood)
+            if (_wetFirewoodPenaltyEnabled.Value && tracked.DampFirewood)
             {
-                float bonus = _firewoodMultiplier.Value;
-                if (_wetFirewoodPenaltyEnabled.Value && tracked.DampFirewood)
-                {
-                    bonus = 1f + (bonus - 1f) * 0.5f;
-                }
-                resistance *= bonus;
+                fuelMultiplier = 1f + (fuelMultiplier - 1f) * 0.5f;
             }
+            resistance = fuelMultiplier;
+        }
+        else if (stoneRing)
+        {
+            resistance = _stoneRingMultiplier.Value;
         }
 
         if (_canopyProtectionEnabled.Value && _canopyMultiplier.Value > 1.001f && IsUnderCanopy(tracked, fire, now))
@@ -1409,21 +1430,202 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
             resistance *= _canopyMultiplier.Value;
         }
 
-        return resistance;
+        return Math.Max(1f, resistance);
+    }
+
+    private static float GetFuelMultiplier(Tracked<CookingFireNew> tracked, CookingFireNew fire, float now, bool stoneRing)
+    {
+        if (!_firewoodBonusEnabled.Value)
+        {
+            return 0f;
+        }
+
+        RefreshFuel(tracked, fire, now, false);
+        if (!tracked.FullFirewood)
+        {
+            return 0f;
+        }
+
+        int layers = GetLogLayers(tracked);
+        if (layers >= 2)
+        {
+            return stoneRing ? _stoneRingTwoLogLayersMultiplier.Value : _twoLogLayersMultiplier.Value;
+        }
+
+        if (layers == 1)
+        {
+            return stoneRing ? _stoneRingOneLogLayerMultiplier.Value : _oneLogLayerMultiplier.Value;
+        }
+
+        return stoneRing ? _stoneRingFirewoodMultiplier.Value : _firewoodMultiplier.Value;
+    }
+
+    private static int GetLogLayers(Tracked<CookingFireNew> tracked)
+    {
+        if (!_logLayerBonusEnabled.Value)
+        {
+            return 0;
+        }
+
+        if (tracked.BonfireLogCount >= BonfireLayerTwoPieces)
+        {
+            return 2;
+        }
+
+        return tracked.BonfireLogCount >= BonfireLayerOnePieces ? 1 : 0;
+    }
+
+    private static bool IsWeatherproofBonfire(Tracked<CookingFireNew> tracked, CookingFireNew fire, float now)
+    {
+        if (!_stoneRingBonfireNeverExtinguishes.Value || !_firewoodBonusEnabled.Value || !_logLayerBonusEnabled.Value || !_stoneRingEnabled.Value)
+        {
+            return false;
+        }
+
+        RefreshFuel(tracked, fire, now, false);
+        if (!tracked.FullFirewood || GetLogLayers(tracked) < 2)
+        {
+            return false;
+        }
+
+        return HasFullStoneRing(tracked, fire, now);
     }
 
     private static bool IsFireSheltered(CookingFireNew fire)
     {
         Vector3 position = fire.transform.position;
-        if (!HasRoofOverhead(position))
+        Transform ownStructure = GetFireStructureRoot(fire);
+        if (HasRoofOverhead(position, ownStructure) && !IsExposedToWindDrivenRain(position, ownStructure))
+        {
+            return true;
+        }
+
+        return IsUnderTarp(fire, position);
+    }
+
+    private static Transform GetFireStructureRoot(CookingFireNew fire)
+    {
+        FireStructure structure = fire.GetComponentInParent<FireStructure>();
+        return structure != null ? structure.transform : fire.transform;
+    }
+
+    private static bool IsUnderTarp(CookingFireNew fire, Vector3 position)
+    {
+        int id = fire.GetInstanceID();
+        float now = Time.time;
+        if (TarpChecks.TryGetValue(id, out TarpCheck? cached) && now < cached.NextCheck)
+        {
+            return cached.UnderTarp;
+        }
+
+        bool underTarp = false;
+        try
+        {
+            TarpCandidateIds.Clear();
+            Collider[] colliders = Physics.OverlapSphere(position + Vector3.up * TarpSearchHeight, TarpSearchRadius, Physics.AllLayers, QueryTriggerInteraction.Collide);
+            foreach (Collider collider in colliders)
+            {
+                if (collider == null)
+                {
+                    continue;
+                }
+
+                Structure? tarp = collider.GetComponentInParent<TarpStructure>();
+                if (tarp == null)
+                {
+                    tarp = collider.GetComponentInParent<PresetTarpStructure>();
+                }
+
+                if (tarp == null || !TarpCandidateIds.Add(tarp.GetInstanceID()))
+                {
+                    continue;
+                }
+
+                if (IsPositionUnderStructure(tarp, position))
+                {
+                    underTarp = true;
+                    break;
+                }
+            }
+            TarpCandidateIds.Clear();
+        }
+        catch (Exception exception)
+        {
+            if (!_canopyWarningLogged)
+            {
+                _canopyWarningLogged = true;
+                RLog.Warning($"[RainExtinguishesFires] Tarp check failed for a fire: {exception.Message}");
+            }
+        }
+
+        if (cached == null)
+        {
+            cached = new TarpCheck();
+            TarpChecks[id] = cached;
+        }
+        cached.UnderTarp = underTarp;
+        cached.NextCheck = now + TarpRefreshInterval;
+        return underTarp;
+    }
+
+    private static bool IsPositionUnderStructure(Structure structure, Vector3 position)
+    {
+        bool hasBounds = false;
+        Bounds bounds = default;
+        Renderer[] renderers = structure.GetComponentsInChildren<Renderer>(true);
+        foreach (Renderer renderer in renderers)
+        {
+            if (renderer == null)
+            {
+                continue;
+            }
+
+            if (!hasBounds)
+            {
+                bounds = renderer.bounds;
+                hasBounds = true;
+            }
+            else
+            {
+                bounds.Encapsulate(renderer.bounds);
+            }
+        }
+
+        if (!hasBounds)
+        {
+            Collider[] colliders = structure.GetComponentsInChildren<Collider>(true);
+            foreach (Collider collider in colliders)
+            {
+                if (collider == null)
+                {
+                    continue;
+                }
+
+                if (!hasBounds)
+                {
+                    bounds = collider.bounds;
+                    hasBounds = true;
+                }
+                else
+                {
+                    bounds.Encapsulate(collider.bounds);
+                }
+            }
+        }
+
+        if (!hasBounds)
         {
             return false;
         }
 
-        return !IsExposedToWindDrivenRain(position);
+        Vector3 min = bounds.min;
+        Vector3 max = bounds.max;
+        return position.x >= min.x - TarpEdgeMargin && position.x <= max.x + TarpEdgeMargin
+            && position.z >= min.z - TarpEdgeMargin && position.z <= max.z + TarpEdgeMargin
+            && max.y > position.y + 0.3f;
     }
 
-    private static bool IsExposedToWindDrivenRain(Vector3 position)
+    private static bool IsExposedToWindDrivenRain(Vector3 position, Transform ownStructure)
     {
         if (!_windFactorEnabled.Value || !_badWeather)
         {
@@ -1447,7 +1649,7 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
 
             Vector3 direction = (upwind.normalized + Vector3.up * WindRayElevation).normalized;
             Vector3 origin = position + Vector3.up * RaycastUpOffset;
-            return !Physics.Raycast(origin, direction, WindCheckDistance, Physics.AllLayers, QueryTriggerInteraction.Ignore);
+            return !RayHitsOutside(origin, direction, WindCheckDistance, ownStructure);
         }
         catch (Exception exception)
         {
@@ -1516,6 +1718,15 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
             }
 
             float now = Time.time;
+            if (kind == FuelKind.BonfireLog)
+            {
+                if (_firewoodBonusEnabled.Value)
+                {
+                    tracked.NextFuelCheck = 0f;
+                }
+                return;
+            }
+
             if (kind == FuelKind.Firewood)
             {
                 if (!_firewoodBonusEnabled.Value)
@@ -1559,6 +1770,7 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
 
         tracked.NextFuelCheck = now + FuelRefreshInterval;
         int firewood = 0;
+        int bonfireLogs = 0;
         try
         {
             var sources = fire._fuelSources;
@@ -1567,9 +1779,19 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
                 for (int i = 0; i < sources.Count; i++)
                 {
                     FireFuelSource source = sources[i];
-                    if (source != null && ClassifyFuel(source) == FuelKind.Firewood)
+                    if (source == null)
+                    {
+                        continue;
+                    }
+
+                    FuelKind kind = ClassifyFuel(source);
+                    if (kind == FuelKind.Firewood)
                     {
                         firewood++;
+                    }
+                    else if (kind == FuelKind.BonfireLog)
+                    {
+                        bonfireLogs++;
                     }
                 }
             }
@@ -1583,34 +1805,18 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
             }
         }
 
+        if (firewood != tracked.FirewoodCount || bonfireLogs != tracked.BonfireLogCount)
+        {
+            RLog.Msg($"[RainExtinguishesFires] Fire {tracked.Id} fuel: {firewood} small firewood pieces, {bonfireLogs} full log pieces.");
+        }
+
         tracked.FirewoodCount = firewood;
-        tracked.FullFirewood = firewood >= GetMaxFuelElements();
+        tracked.BonfireLogCount = bonfireLogs;
+        tracked.FullFirewood = firewood >= FullSmallFirewoodPieces;
         if (firewood == 0)
         {
             tracked.DampFirewood = false;
         }
-    }
-
-    private static int GetMaxFuelElements()
-    {
-        if (_maxFuelElements > 0)
-        {
-            return _maxFuelElements;
-        }
-
-        try
-        {
-            _maxFuelElements = FireStructure.MaxFireFuelElement;
-        }
-        catch (Exception)
-        {
-        }
-
-        if (_maxFuelElements <= 0)
-        {
-            _maxFuelElements = DefaultMaxFuelElements;
-        }
-        return _maxFuelElements;
     }
 
     private static FuelKind ClassifyFuel(FireFuelSource source)
@@ -1623,6 +1829,10 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
         if (combined.Contains("leaf") || combined.Contains("leaves"))
         {
             kind = FuelKind.Leaves;
+        }
+        else if (combined.Contains("bonfire"))
+        {
+            kind = FuelKind.BonfireLog;
         }
         else if (combined.Contains("firewood") || combined.Contains("log"))
         {
@@ -1681,7 +1891,7 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
             GameObject root = new("RainExtinguishesFires_WarmEmbers");
             root.transform.position = position;
             effect.Root = root;
-            SpawnWarmEmbers(fire, root.transform);
+            SpawnWarmEmbers(FindEmberTemplates(GetFlameSearchRoots(fire)), root.transform);
             StartSizzle(fire, position, effect);
         }
         catch (Exception exception)
@@ -1694,12 +1904,42 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
         }
     }
 
-    private static void SpawnWarmEmbers(CookingFireNew fire, Transform root)
+    private static void StartTorchWarmEffect(TorchWeaponController torch)
     {
-        List<ParticleSystem> templates = FindEmberTemplates(fire);
+        StopTorchWarmEffect();
+        try
+        {
+            Transform anchor = torch._burnerLocator != null ? torch._burnerLocator : torch.transform;
+            GameObject root = new("RainExtinguishesFires_TorchEmbers");
+            root.transform.SetParent(anchor, false);
+            root.transform.localPosition = Vector3.zero;
+            _torchWarmRoot = root;
+            SpawnWarmEmbers(FindEmberTemplates(new List<Transform> { torch.transform }), root.transform);
+        }
+        catch (Exception exception)
+        {
+            if (!_warmEffectWarningLogged)
+            {
+                _warmEffectWarningLogged = true;
+                RLog.Warning($"[RainExtinguishesFires] Could not create torch still-warm effect: {exception.Message}");
+            }
+        }
+    }
+
+    private static void StopTorchWarmEffect()
+    {
+        if (_torchWarmRoot != null)
+        {
+            UnityEngine.Object.Destroy(_torchWarmRoot);
+        }
+        _torchWarmRoot = null;
+    }
+
+    private static void SpawnWarmEmbers(List<ParticleSystem> templates, Transform root)
+    {
         if (templates.Count == 0)
         {
-            RLog.Msg("[RainExtinguishesFires] No ember particles found on this fire, skipping still-warm embers.");
+            RLog.Msg("[RainExtinguishesFires] No ember particles found, skipping still-warm embers.");
             return;
         }
 
@@ -1730,11 +1970,11 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
         }
     }
 
-    private static List<ParticleSystem> FindEmberTemplates(CookingFireNew fire)
+    private static List<ParticleSystem> FindEmberTemplates(List<Transform> searchRoots)
     {
         List<ParticleSystem> named = new();
         List<ParticleSystem> small = new();
-        foreach (Transform searchRoot in GetFlameSearchRoots(fire))
+        foreach (Transform searchRoot in searchRoots)
         {
             ParticleSystem[] systems = searchRoot.GetComponentsInChildren<ParticleSystem>(true);
             foreach (ParticleSystem system in systems)
@@ -2216,7 +2456,7 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
         {
             torch.OnSprinklersInfluenceCountChanged(1);
             QueueSprinklerReset(torch, null, null);
-            MarkHandheldWet(HandheldKind.Torch);
+            MarkHandheldWet(HandheldKind.Torch, torch);
             PlayExtinguishSound();
         }
     }
@@ -2386,6 +2626,30 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
             QueryTriggerInteraction.Ignore);
     }
 
+    private static bool HasRoofOverhead(Vector3 position, Transform ownStructure)
+    {
+        return RayHitsOutside(position + Vector3.up * RaycastUpOffset, Vector3.up, RoofCheckDistance, ownStructure);
+    }
+
+    private static bool RayHitsOutside(Vector3 origin, Vector3 direction, float distance, Transform ownStructure)
+    {
+        RaycastHit[] hits = Physics.RaycastAll(origin, direction, distance, Physics.AllLayers, QueryTriggerInteraction.Ignore);
+        foreach (RaycastHit hit in hits)
+        {
+            Collider collider = hit.collider;
+            if (collider == null)
+            {
+                continue;
+            }
+
+            if (!collider.transform.IsChildOf(ownStructure))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static void PlayExtinguishSound()
     {
         if (!_playExtinguishSound.Value || !TryLoadExtinguishSound())
@@ -2399,6 +2663,12 @@ public class RainExtinguishesFiresMod : SonsMod, IOnUpdateReceiver
             LogFmodWarning($"Could not play WAV (FMOD result: {result}).");
         }
     }
+}
+
+internal sealed class TarpCheck
+{
+    public bool UnderTarp;
+    public float NextCheck;
 }
 
 internal sealed class SprinklerReset
@@ -2430,6 +2700,7 @@ internal sealed class Tracked<T> where T : UnityEngine.Object
     public bool UnderCanopy;
     public float NextCanopyCheck;
     public int FirewoodCount;
+    public int BonfireLogCount;
     public bool FullFirewood;
     public bool DampFirewood;
     public float NextFuelCheck;

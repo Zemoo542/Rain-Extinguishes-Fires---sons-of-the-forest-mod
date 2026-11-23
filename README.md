@@ -33,13 +33,13 @@ Settings are stored in `UserData/RainExtinguishesFires/` and can be changed from
 | `LightPrecipitationTimer` | `15` | 1–60 s | Timer during light rain or snow. |
 | `MediumPrecipitationTimer` | `5` | 1–60 s | Timer during medium rain or snow. |
 | `HeavyPrecipitationTimer` | `2` | 1–60 s | Timer during heavy rain or snow. |
-| `ScaleHandheldsWithWeatherTiers` | `false` | | Scales handheld timers by the active tier, relative to the medium timer. |
+| `ScaleHandheldsWithWeatherTiers` | `true` | | Scales handheld timers by the active tier, relative to the medium timer. Only takes effect when `UseWeatherIntensityTiers` is on. |
 
 ### Wet Fires & Relighting (`WetFires.cfg`)
 | Setting | Default | Range | Description |
 |---|---|---|---|
 | `PreventRelightInRain` | `false` | | Campfires put out by the weather cannot be relit while unsheltered until the rain or snow has stopped for 20 seconds. Changes between rain types do not unlock them. |
-| `LightRainWarmGracePeriod` | `3` | 0–15 s | During light rain or snow, the time a campfire or handheld item stays relightable after going out. Campfires give off small floating embers and a sizzle sound during this time. A relight started inside the grace period always finishes. |
+| `LightRainWarmGracePeriod` | `3` | 0–15 s | During light rain or snow, the time a campfire or handheld item stays relightable after going out. Campfires give off small floating embers and a sizzle sound during this time, and a held torch gives off small embers. A relight started inside the grace period always finishes. |
 | `BlockIgnitionInHeavyWeather` | `false` | | Unsheltered campfires cannot be lit at all during heavy rain or snow. |
 
 ### Shelter & Wind (`Shelter.cfg`)
@@ -49,11 +49,22 @@ Settings are stored in `UserData/RainExtinguishesFires/` and can be changed from
 | `CanopyResistanceMultiplier` | `1.5` | 1.0–3.0× | Timer multiplier for campfires under a tree canopy. |
 | `WindDirectionFactor` | `false` | | During windy rain or snow, a roofed campfire still counts as exposed if nothing blocks the rain from the upwind side. |
 
+A campfire under a tarp (including a tarp held up by sticks) always counts as sheltered: it can be lit in any weather and rain or snow never puts it out. This has no setting.
+
 ### Fuel & Firewood (`Fuel.cfg`)
 | Setting | Default | Range | Description |
 |---|---|---|---|
-| `FirewoodResistanceBonus` | `true` | | Campfires with a full load of firewood (every fuel slot filled with firewood) last longer. Stacks with the stone ring and canopy bonuses. |
-| `FirewoodResistanceMultiplier` | `2.0` | 1.0–3.0× | Timer multiplier for campfires with firewood. |
+| `FirewoodResistanceBonus` | `true` | | Enables the firewood levels below. Small firewood counts once every fuel slot is filled with it. |
+| `FirewoodResistanceMultiplier` | `2.0` | 1.0–10.0× | Small firewood. |
+| `StoneRingFirewoodMultiplier` | `3.0` | 1.0–10.0× | Full stone ring + small firewood. |
+| `LogLayerBonus` | `true` | | Enables the full-log levels below. Layer one is the first 2 full logs, layer two the next 4. |
+| `OneLogLayerMultiplier` | `3.5` | 1.0–10.0× | Small firewood + one layer of full logs. |
+| `StoneRingOneLogLayerMultiplier` | `4.0` | 1.0–10.0× | Full stone ring + small firewood + one layer of full logs. |
+| `TwoLogLayersMultiplier` | `5.0` | 1.0–10.0× | Small firewood + two layers of full logs. |
+| `StoneRingBonfireNeverExtinguishes` | `true` | | Full stone ring + small firewood + two layers of full logs: rain and snow can't put the fire out (wind ignored). It still burns through its fuel normally. |
+| `StoneRingTwoLogLayersMultiplier` | `6.0` | 1.0–10.0× | Full stone ring + small firewood + two layers of full logs when `StoneRingBonfireNeverExtinguishes` is off. |
+
+Each level's multiplier is the total for that setup and does not stack with the stone ring multiplier. Tree canopy protection still stacks on top. A stone ring without a full load of small firewood uses `StoneRingTimerMultiplier`.
 | `WetFirewoodPenalty` | `false` | | Firewood added to an unroofed campfire while it is raining or snowing is damp and gives half the bonus (2.0× becomes 1.5×) until it burns away. |
 | `LeafStokeExtension` | `false` | | Adding leaves to a lit campfire in rain or snow removes some of its built-up exposure. |
 | `LeafStokeSeconds` | `1.0` | 0.5–5.0 s | Exposure removed per leaf stoke. Stokes on the same fire count once every 5 seconds, or every 2× this value if longer. |
@@ -73,9 +84,21 @@ Settings are stored in `UserData/RainExtinguishesFires/` and can be changed from
 | `FireArrowTimer` | `5` | 1–30 s | Fire arrow timer. |
 | `ExtinguishHeldMolotovs` | `false` | | Lit held molotovs go out while the player is unsheltered. |
 | `HeldMolotovTimer` | `3` | 1–30 s | Molotov timer. |
-| `PreventHandheldRelightInRain` | `true` | | Torches, molotovs and fire arrows put out by the weather cannot be relit while the player is unsheltered until the rain or snow stops. Uses the same light-rain grace period as campfires. |
+| `PreventHandheldRelightInRain` | `false` | | Torches, molotovs and fire arrows put out by the weather cannot be relit while the player is unsheltered until the rain or snow stops. Uses the same light-rain grace period as campfires. |
 
 ## Changelog
+
+### 1.4.0
+- Fixed handheld torches, molotovs and fire arrows playing the lighting animation and sound when relighting was blocked. Blocked attempts are now stopped before the animation starts.
+- The "too wet to light" message now uses the game's own notification again.
+- A held torch now shows small still-warm embers during the light-rain grace period.
+- `PreventHandheldRelightInRain` is now off by default and `ScaleHandheldsWithWeatherTiers` is on by default (it only takes effect when `UseWeatherIntensityTiers` is on).
+- Added `StoneRingTwoLogLayersMultiplier` (6× by default), used for stone ring + small firewood + two log layers when `StoneRingBonfireNeverExtinguishes` is off.
+- Campfires under a tarp, including a tarp held up by 4 sticks, now count as sheltered: they can be lit and stay lit in any weather.
+- Added full-log fuel levels: small firewood + one layer of full logs (3.5×, or 4× with a stone ring) and small firewood + two layers (5×).
+- A campfire with a full stone ring, small firewood and two layers of full logs can no longer be put out by rain or snow.
+- Stone ring + small firewood now has its own configurable multiplier (3× by default).
+- Full logs are no longer counted as small firewood.
 
 ### 1.3.1
 - Rebuilt for .NET 6 so the mod loads on standard RedLoader. The previous build targeted a newer .NET and could stop RedLoader from loading other mods.
